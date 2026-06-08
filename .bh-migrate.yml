@@ -1,0 +1,16 @@
+include:
+  - dags/**/*.py
+exclude:
+  - "**/legacy/**"
+  - "**/.git/**"
+  - "**/migrated/**"
+
+platform: gcp-dataproc
+target_format: spark-plain
+
+quality:
+  lint:
+    auto_fix: false
+  build:
+    mode: syntax
+    fail_on_error: false
