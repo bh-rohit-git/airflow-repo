@@ -1,0 +1,32 @@
+gcp_project_id: YOUR_GCP_PROJECT
+gcp_region: us-east1
+dataproc_cluster_name: sales-analytics
+dataproc_cluster_config:
+  gce_cluster_config:
+    zone_uri: us-east1-b
+    subnetwork_uri: projects/bh-vpc-host-nprd/regions/us-east1/subnetworks/nprd-bh-use1-dev-us-east1
+    service_account: bh-d-dataproc-sa@nprd-bh-use1-dev.iam.gserviceaccount.com
+    metadata:
+      PIP_PACKAGES: papermill>=2.4.0
+  master_config:
+    num_instances: 1
+    machine_type_uri: n2-standard-2
+    disk_config:
+      boot_disk_size_gb: 50
+      boot_disk_type: pd-standard
+  worker_config:
+    num_instances: 0
+    machine_type_uri: n2-standard-2
+    disk_config:
+      boot_disk_size_gb: 50
+      boot_disk_type: pd-standard
+  software_config:
+    image_version: 2.2.81-debian12
+    optional_components:
+    - DELTA
+  lifecycle_config:
+    idle_delete_ttl:
+      seconds: 1800
+  initialization_actions:
+  - executable_file: gs://goog-dataproc-initialization-actions-us-east1/python/pip-install.sh
+papermill_driver_uri: gs://YOUR_BUCKET/scripts/run_papermill.py
