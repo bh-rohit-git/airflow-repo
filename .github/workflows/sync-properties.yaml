@@ -81,7 +81,6 @@ jobs:
           echo "Syncing '${SOURCE}/' to '${DEST_URI}/' (preserving folder structure)..."
 
           gcloud storage rsync "$SOURCE" "$DEST_URI" \
-            --recursive \
-            --delete-unmatched-destination-objects
+            --recursive
 
           echo "Properties sync completed successfully."
