@@ -1,4 +1,4 @@
-gcp_project_id: YOUR_GCP_PROJECT
+gcp_project_id: nprd-bh-use1-dev
 gcp_region: us-east1
 dataproc_cluster_name: sales-analytics
 dataproc_cluster_config:
