@@ -14,3 +14,6 @@ quality:
   build:
     mode: syntax
     fail_on_error: false
+cicd:
+  github:
+    emit_workflows: false
