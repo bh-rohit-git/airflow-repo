@@ -1,0 +1,25 @@
+sources:
+- databricks-migrate-activity.schema1.customer_events
+catalog: databricks-migrate-activity
+clone_notebook: notebooks/dualrun/ensure_clones.py
+compare_notebook: notebooks/dualrun/compare_outputs.py
+clones:
+- source_ref: databricks-migrate-activity.schema1.customer_events
+  index: 1
+  fqn: databricks-migrate-activity.schema1.customer_events_dual_clone_1
+  location: __runtime__/schema1/customer_events_dual_clone_1
+- source_ref: databricks-migrate-activity.schema1.customer_events
+  index: 2
+  fqn: databricks-migrate-activity.schema1.customer_events_dual_clone_2
+  location: __runtime__/schema1/customer_events_dual_clone_2
+compare_pairs:
+- left_ref: databricks-migrate-activity.schema1.customer_events_dual_clone_1
+  right_ref: databricks-migrate-activity.schema1.customer_events_dual_clone_2
+  label: customer_events
+compare_config:
+  enable_distribution_by_status: false
+  ignore_technical_columns:
+  - _commit_timestamp
+  - _commit_version
+  fail_on_duplicate_keys: true
+compare_results_path: dbfs:/tmp/dual_run/compare_results.json
