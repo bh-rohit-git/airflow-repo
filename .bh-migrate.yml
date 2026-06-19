@@ -14,6 +14,45 @@ quality:
   build:
     mode: syntax
     fail_on_error: false
+
+# --- Dual-run (required block) ---
+dual_run:
+  enabled: true                    # Required for migrate-repo; also enables clone/compare emit
+  emit_pipeline_dag: true          # Emits dual_run_pipeline_<dag_id>.py (trigger-based orchestrator)
+
+  # Do NOT inject clone/compare into migrated Dataproc DAGs when source runs on Databricks
+  inject_clone_task: false
+  emit_clone_notebook: true
+  clone_notebook_relpath: notebooks/dualrun/ensure_clones.py
+
+  # UC Volume paths for ensure_clones.py / compare_outputs.py (used in emitted pipeline DAG)
+  # Option A — full path (explicit, recommended):
+  databricks_uc_volume_base: /Volumes/databricks-migrate-activity/schema1/dualrun
+  # Option B — infer schema from target tables (catalog.schema.table) or config/migration.yml:
+  # databricks_uc_schema: schema1
+  # databricks_uc_volume_name: dualrun
+
+  # Optional: only if crawl cannot discover write targets
+  # sources:
+  #   - databricks-migrate-activity.schema1.customer_events
+
+  compare:
+    emit_notebook: true
+    notebook_relpath: notebooks/dualrun/compare_outputs.py
+    inject_dag_task: false           # Dataproc-only inject; keep false for Databricks pipeline
+    results_output_path: dbfs:/tmp/dual_run/compare_results.json
+    # Optional compare tuning:
+    # pair_overrides:
+    #   customer_events:
+    #     key_columns: [id]
+    compare_config:
+      fail_on_duplicate_keys: true
+
+# --- CI/CD deploy (Composer + UC Volume upload) ---
 cicd:
   github:
-    emit_workflows: false
+    emit_workflows: true           # Was false — set true to emit build-deploy-dags.yaml
+    dags_dir: dags
+    plugins_dir: plugins
+    dualrun_notebooks_dir: notebooks/dualrun
+    databricks_uc_volume_base: /Volumes/databricks-migrate-activity/schema1/dualrun
