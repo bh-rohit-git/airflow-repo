@@ -1,0 +1,70 @@
+sources:
+- databricks-migrate-activity.schema1.customer_events
+catalog: databricks-migrate-activity
+clone_notebook: notebooks/dualrun/run_spark_merge_serverless_dag/ensure_clones.py
+compare_notebook: notebooks/dualrun/run_spark_merge_serverless_dag/compare_outputs.py
+clones:
+- source_ref: databricks-migrate-activity.schema1.customer_events
+  index: 1
+  fqn: databricks-migrate-activity.schema1.customer_events_dual_clone_1
+  location: __runtime__/schema1/customer_events_dual_clone_1
+- source_ref: databricks-migrate-activity.schema1.customer_events
+  index: 2
+  fqn: databricks-migrate-activity.schema1.customer_events_dual_clone_2
+  location: __runtime__/schema1/customer_events_dual_clone_2
+compare_pairs:
+- left_ref: databricks-migrate-activity.schema1.customer_events_dual_clone_1
+  right_ref: databricks-migrate-activity.schema1.customer_events_dual_clone_2
+  label: customer_events
+compare_config:
+  enabled: true
+  report:
+    root_uri: gs://migration-dualrun/reports
+    summary_json: true
+    summary_markdown: true
+    summary_html: false
+    detail_format: delta
+    write_audit_tables: true
+    audit_catalog: migration_audit
+    audit_schema: dualrun
+  row_details:
+    enabled: true
+    max_issue_rows_per_table: null
+    max_sample_rows_in_summary: 100
+    include_full_row_json: true
+    include_column_diff_json: true
+    include_mismatch_columns: true
+    max_json_length: 100000
+  comparison_rules:
+    fail_on_duplicate_keys: true
+    ignored_columns:
+    - _commit_timestamp
+    - _commit_version
+    - _change_type
+    - _change_ordinal
+    - run_id
+    - load_ts
+    - updated_at
+    sensitive_columns: []
+    numeric_tolerances: {}
+    timestamp_tolerance_seconds: 0
+  checks:
+    enable_basic_stats: true
+    enable_null_stats: true
+    enable_distinct_stats: true
+    enable_numeric_stats: true
+    enable_datetime_stats: true
+    enable_distribution_stats: true
+    enable_row_comparison: true
+    enable_delta_operation_metrics: true
+    enable_delta_version_stats: true
+    enable_distribution_by_status: false
+  filters:
+    business_date: null
+    where_clause: null
+  runtime:
+    fail_process_on:
+    - FAIL
+    - BLOCKED
+  numeric_columns: null
+compare_results_path: dbfs:/tmp/dual_run/compare_results.json
