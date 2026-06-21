@@ -150,14 +150,17 @@ jobs:
 
           FILE_COUNT="$(find "$SOURCE" -type f -name '*.py' | wc -l | tr -d ' ')"
           DEST_URI="gs://${BUCKET}/${PREFIX}"
-          echo "Rsyncing ${FILE_COUNT} .py file(s) from '${SOURCE}/' to '${DEST_URI}/'..."
+          echo "Uploading ${FILE_COUNT} .py file(s) from '${SOURCE}/' to '${DEST_URI}/'..."
 
-          gcloud storage rsync "$SOURCE" "$DEST_URI" \
-            --recursive \
-            --include='**.py' \
-            --exclude='*'
+          UPLOADED=0
+          while IFS= read -r -d '' py_file; do
+            rel="${py_file#"$SOURCE/"}"
+            echo "  -> ${rel}"
+            gcloud storage cp "$py_file" "${DEST_URI}/${rel}"
+            UPLOADED=$((UPLOADED + 1))
+          done < <(find "$SOURCE" -type f -name '*.py' -print0)
 
-          echo "airflow/dags sync completed successfully."
+          echo "airflow/dags sync completed successfully (${UPLOADED} file(s))."
 
       - name: Rsync plugins/ folder to Composer bucket
         run: |
