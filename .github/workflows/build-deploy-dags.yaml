@@ -45,7 +45,7 @@ env:
   GCS_JAR_PREFIX: ${{ vars.GCS_JAR_PREFIX || 'jars' }}
   JAR_FILE_URIS: ${{ vars.JAR_FILE_URIS }}
   VERSIONLESS_JAR_NAME: ${{ vars.VERSIONLESS_JAR_NAME }}
-  DATABRICKS_WORKSPACE_BASE: ${{ vars.DATABRICKS_WORKSPACE_BASE }}
+  DATABRICKS_WORKSPACE_BASE: ${{ vars.DATABRICKS_WORKSPACE_BASE || '/Workspace/Users/rohit@bighammer.ai/dualrun' }}
   PATCH_JAR_SCRIPT: .github/patch_dag_jar_uris.py
 
 jobs:
@@ -247,7 +247,7 @@ jobs:
             while IFS= read -r -d '' py_file; do
               remote_path="$DEST_DIR/$(basename "$py_file")"
               echo "  -> $remote_path"
-              databricks workspace import "$py_file" "$remote_path" --format SOURCE --language PYTHON --overwrite
+              databricks workspace import "$remote_path" --file "$py_file" --format SOURCE --language PYTHON --overwrite
             done < <(find "$DAG_DIR" -maxdepth 1 -type f -name '*.py' -print0)
             UPLOADED=$((UPLOADED + 1))
           done
