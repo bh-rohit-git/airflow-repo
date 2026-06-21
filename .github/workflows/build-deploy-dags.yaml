@@ -1,0 +1,38 @@
+# Registration stub on main for workflow_dispatch API discovery.
+#
+# GitHub requires this workflow file to exist on the default branch before
+# workflow_dispatch can target a migration/feature branch via ref=.
+# The full deploy logic lives on migration output branches; dispatch with
+# ref=<migration-branch> runs that branch's version of this file.
+#
+# See: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_dispatch
+#
+name: build-deploy-dags
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: 'GitHub Environment to use (loads env secrets/vars)'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - prod
+        default: 'dev'
+
+jobs:
+  build-deploy-dags:
+    name: Register build-deploy-dags workflow (main stub)
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.target_environment }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Stub only on main
+        run: |
+          echo "This is the main-branch registration stub for build-deploy-dags."
+          echo "Dual-run and migration deploys should dispatch with ref=<migration-branch>"
+          echo "so the full workflow from that branch runs (DAG sync, plugins, dual-run notebooks)."
