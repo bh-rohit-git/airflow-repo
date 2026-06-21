@@ -27,7 +27,7 @@ SOURCE_DAG_CONF = {
         "clone_index": 1,
         "main_class": "com.example.merge.Main",
         "group_id": "com.example.merge.Main:97f8bbd025f5",
-        "project_id": "dcacfeb5-ef82-4266-9e9a-0577ea65f993",
+        "project_id": "workspace-migration",
         "target_overrides": {
             "target-table": "`databricks-migrate-activity`.schema1.customer_events_dual_clone_1"
         }
@@ -41,7 +41,7 @@ MIGRATED_DAG_CONF = {
         "clone_index": 2,
         "main_class": "com.example.merge.Main",
         "group_id": "com.example.merge.Main:97f8bbd025f5",
-        "project_id": "dcacfeb5-ef82-4266-9e9a-0577ea65f993",
+        "project_id": "workspace-migration",
         "target_overrides": {
             "target-table": "databricks-migrate-activity.schema1.customer_events_dual_clone_2"
         }
@@ -56,16 +56,19 @@ def _serverless_notebook_task(
     notebook_path: str,
     base_parameters: dict,
 ) -> dict:
+    notebook_task: dict = {
+        "notebook_path": notebook_path,
+        "base_parameters": base_parameters,
+    }
+    if notebook_path.startswith("/Workspace/"):
+        notebook_task["source"] = "WORKSPACE"
     return {
         "run_name": task_key,
         "tasks": [
             {
                 "task_key": task_key,
                 "environment_key": "default",
-                "notebook_task": {
-                    "notebook_path": notebook_path,
-                    "base_parameters": base_parameters,
-                },
+                "notebook_task": notebook_task,
             }
         ],
         "environments": [
@@ -89,7 +92,7 @@ with DAG(
     ensure_dualrun_clones = DatabricksSubmitRunOperator(
         task_id="ensure_dualrun_clones",
         databricks_conn_id=DATABRICKS_CONN_ID,
-        json=_serverless_notebook_task("ensure_clones", "/Volumes/databricks-migrate-activity/schema1/dualrun/test_spark_merge_serverless_dag/ensure_clones.py", {}),
+        json=_serverless_notebook_task("ensure_clones", "/Workspace/Users/rohit@bighammer.ai/dualrun/test_spark_merge_serverless_dag/ensure_clones.py", {}),
     )
 
     trigger_source_dag = TriggerDagRunOperator(
@@ -111,7 +114,7 @@ with DAG(
         databricks_conn_id=DATABRICKS_CONN_ID,
         json=_serverless_notebook_task(
             "compare_outputs",
-            "/Volumes/databricks-migrate-activity/schema1/dualrun/test_spark_merge_serverless_dag/compare_outputs.py",
+            "/Workspace/Users/rohit@bighammer.ai/dualrun/test_spark_merge_serverless_dag/compare_outputs.py",
             {'dual_run_id': '{{ params.dual_run_id }}', 'project_name': '{{ params.project_name }}', 'report_root': 'dbfs:/tmp/dual_run'},
         ),
     )
