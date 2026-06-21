@@ -27,7 +27,8 @@ dual_run:
 
   # UC Volume paths for ensure_clones.py / compare_outputs.py (used in emitted pipeline DAG)
   # Option A — full path (explicit, recommended):
-  databricks_uc_volume_base: /Volumes/databricks-migrate-activity/schema1/dualrun
+  databricks_workspace_base: /Workspace/Users/rohit@bighammer.ai/dualrun
+  
   # Option B — infer schema from target tables (catalog.schema.table) or config/migration.yml:
   # databricks_uc_schema: schema1
   # databricks_uc_volume_name: dualrun
@@ -56,3 +57,4 @@ cicd:
     plugins_dir: plugins
     dualrun_notebooks_dir: notebooks/dualrun
     databricks_uc_volume_base: /Volumes/databricks-migrate-activity/schema1/dualrun
+    databricks_workspace_base: /Workspace/Users/rohit@bighammer.ai/dualrun
