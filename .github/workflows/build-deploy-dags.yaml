@@ -4,16 +4,16 @@
 # - rsync all files under dags/           -> gs://<composer-bucket>/dags/
 # - rsync .py files under airflow/dags/   -> gs://<composer-bucket>/dags/
 # - rsync all files under plugins/        -> gs://<composer-bucket>/plugins/
-# - upload dual-run scripts         -> dbfs:/Volumes/<catalog>/<schema>/<volume>/{source_dag_id}/ on Databricks
+# - upload dual-run notebooks  -> /Workspace/.../dualrun/{source_dag_id}/ on Databricks
 #
 # GitHub Environment vars (optional overrides):
 #   GCP_PROJECT_ID, WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT, GCS_BUCKET
 #   JAR_FILE_URIS — comma-separated or JSON array (e.g. gs://bucket/jars/app.jar)
 #   GCS_JAR_PREFIX, VERSIONLESS_JAR_NAME — used when JAR_FILE_URIS is unset
-#   DATABRICKS_HOST, DATABRICKS_UC_VOLUME_BASE
+#   DATABRICKS_HOST, DATABRICKS_WORKSPACE_BASE
 #
 # GitHub Environment secret:
-#   DATABRICKS_TOKEN — PAT with API scopes: files, unity-catalog (required for fs cp to volumes)
+#   DATABRICKS_TOKEN — PAT with workspace import permissions
 #
 name: build-deploy-dags
 
@@ -45,7 +45,7 @@ env:
   GCS_JAR_PREFIX: ${{ vars.GCS_JAR_PREFIX || 'jars' }}
   JAR_FILE_URIS: ${{ vars.JAR_FILE_URIS }}
   VERSIONLESS_JAR_NAME: ${{ vars.VERSIONLESS_JAR_NAME }}
-  DATABRICKS_UC_VOLUME_BASE: ${{ vars.DATABRICKS_UC_VOLUME_BASE || '/Volumes/databricks-migrate-activity/schema1/dualrun' }}
+  DATABRICKS_WORKSPACE_BASE: ${{ vars.DATABRICKS_WORKSPACE_BASE }}
   PATCH_JAR_SCRIPT: .github/patch_dag_jar_uris.py
 
 jobs:
@@ -197,7 +197,7 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@v0.272.0
 
-      - name: Upload dual-run scripts to UC Volume
+      - name: Upload dual-run notebooks to Databricks Workspace
         env:
           DATABRICKS_AUTH_TYPE: pat
           DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
@@ -206,28 +206,31 @@ jobs:
           set -euo pipefail
 
           SOURCE="${{ env.DUALRUN_NOTEBOOKS_DIR }}"
-          DEST="${{ env.DATABRICKS_UC_VOLUME_BASE }}"
+          DEST="${{ env.DATABRICKS_WORKSPACE_BASE }}"
 
           if [ -z "${DEST}" ]; then
-            echo "DATABRICKS_UC_VOLUME_BASE is not set; skipping dual-run UC Volume upload."
+            echo "DATABRICKS_WORKSPACE_BASE is not set; skipping dual-run Workspace upload."
             exit 0
           fi
 
           if [ -z "${{ env.DATABRICKS_HOST }}" ]; then
-            echo "DATABRICKS_HOST is not set; skipping dual-run UC Volume upload."
+            echo "DATABRICKS_HOST is not set; skipping dual-run Workspace upload."
             exit 0
           fi
 
           if [ ! -d "$SOURCE" ]; then
-            echo "No ${SOURCE}/ directory; skipping dual-run UC Volume upload."
+            echo "No ${SOURCE}/ directory; skipping dual-run Workspace upload."
             exit 0
           fi
 
-          # CLI requires dbfs:/Volumes/... for volume paths
           case "$DEST" in
-            dbfs:*) ;;
-            /Volumes/*) DEST="dbfs:$DEST" ;;
+            /Users/*) DEST="/Workspace$DEST" ;;
           esac
+
+          if [[ ! "$DEST" == /Workspace/* ]]; then
+            echo "DATABRICKS_WORKSPACE_BASE must start with /Workspace/ or /Users/; skipping upload."
+            exit 0
+          fi
 
           UPLOADED=0
           for DAG_DIR in "$SOURCE"/*/; do
@@ -238,16 +241,21 @@ jobs:
               continue
             fi
             DEST_DIR="$DEST/$SOURCE_DAG_ID"
+            databricks workspace mkdirs "$DEST_DIR" || true
             FILE_COUNT="$(find "$DAG_DIR" -maxdepth 1 -type f -name '*.py' | wc -l | tr -d ' ')"
-            echo "Uploading ${FILE_COUNT} dual-run script(s) from '${DAG_DIR}' to '${DEST_DIR}/'..."
-            databricks fs cp "$DAG_DIR" "$DEST_DIR" --recursive --overwrite
+            echo "Importing ${FILE_COUNT} dual-run notebook(s) from '${DAG_DIR}' to '${DEST_DIR}/'..."
+            while IFS= read -r -d '' py_file; do
+              remote_path="$DEST_DIR/$(basename "$py_file")"
+              echo "  -> $remote_path"
+              databricks workspace import "$py_file" "$remote_path" --format SOURCE --language PYTHON --overwrite
+            done < <(find "$DAG_DIR" -maxdepth 1 -type f -name '*.py' -print0)
             UPLOADED=$((UPLOADED + 1))
           done
 
           if [ "$UPLOADED" -eq 0 ]; then
-            echo "No dual-run source_dag_id subdirectories with .py files under ${SOURCE}/; skipping UC Volume upload."
+            echo "No dual-run source_dag_id subdirs with .py files under ${SOURCE}/; skipping Workspace upload."
             exit 0
           fi
 
-          echo "Dual-run UC Volume upload completed (${UPLOADED} source_dag_id folder(s))."
-          databricks fs ls "$DEST" --recursive | head -50 || true
+          echo "Dual-run Workspace upload completed (${UPLOADED} source_dag_id folder(s))."
+          databricks workspace list "$DEST" || true
