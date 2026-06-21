@@ -27,7 +27,7 @@ SOURCE_DAG_CONF = {
         "clone_index": 1,
         "main_class": "com.example.merge.Main",
         "group_id": "com.example.merge.Main:97f8bbd025f5",
-        "project_id": "45436b2a-42b5-4ef7-b0f2-0dabf258c263",
+        "project_id": "workspace-migration",
         "target_overrides": {
             "target-table": "`databricks-migrate-activity`.schema1.customer_events_dual_clone_1"
         }
@@ -41,7 +41,7 @@ MIGRATED_DAG_CONF = {
         "clone_index": 2,
         "main_class": "com.example.merge.Main",
         "group_id": "com.example.merge.Main:97f8bbd025f5",
-        "project_id": "45436b2a-42b5-4ef7-b0f2-0dabf258c263",
+        "project_id": "workspace-migration",
         "target_overrides": {
             "target-table": "databricks-migrate-activity.schema1.customer_events_dual_clone_2"
         }
@@ -115,7 +115,7 @@ with DAG(
         json=_serverless_notebook_task(
             "compare_outputs",
             "/Workspace/Users/rohit@bighammer.ai/dualrun/test_spark_merge_serverless_dag/compare_outputs.py",
-            {'dual_run_id': '{{ params.dual_run_id }}', 'project_name': '{{ params.project_name }}', 'report_root': 'dbfs:/tmp/dual_run'},
+            {'dual_run_id': "{{ (dag_run.conf or {}).get('dual_run_id', dag_run.run_id) }}", 'project_name': "{{ (dag_run.conf or {}).get('project_name', dag.dag_id) }}", 'report_root': 'dbfs:/tmp/dual_run'},
         ),
     )
 
