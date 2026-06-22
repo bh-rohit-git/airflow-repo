@@ -41,7 +41,8 @@ dual_run:
     emit_notebook: true
     notebook_relpath: notebooks/dualrun/compare_outputs.py
     inject_dag_task: false           # Dataproc-only inject; keep false for Databricks pipeline
-    results_output_path: dbfs:/tmp/dual_run/compare_results.json
+    report_root_uri: /Volumes/databricks-migrate-activity/schema1/dualrun/dual_run_reports
+    results_output_path: /Volumes/databricks-migrate-activity/schema1/dualrun/dual_run_reports/compare_results.json
     # Optional compare tuning:
     # pair_overrides:
     #   customer_events:
