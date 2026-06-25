@@ -1,13 +1,13 @@
 runtime_notebooks: true
 catalog: databricks-migrate-activity
 sources:
-- databricks-migrate-activity.schema1.customer_events_dual_clone_1
+- databricks-migrate-activity.schema1.customer_events
 clone_notebook: notebooks/dualrun/test_spark_merge_serverless_dag/ensure_clones.py
 compare_notebook: notebooks/dualrun/test_spark_merge_serverless_dag/compare_outputs.py
 compare_pairs:
-- left_ref: databricks-migrate-activity.schema1.customer_events_dual_clone_1_dual_clone_1
-  right_ref: databricks-migrate-activity.schema1.customer_events_dual_clone_1_dual_clone_2
-  label: customer_events_dual_clone_1
+- left_ref: databricks-migrate-activity.schema1.customer_events_dual_clone_1
+  right_ref: databricks-migrate-activity.schema1.customer_events_dual_clone_2
+  label: customer_events
 compare_config:
   enabled: true
   report:
@@ -85,7 +85,7 @@ run_parameters:
   schema_hint: null
 - parameter: target-table
   role: target
-  default_value: databricks-migrate-activity.schema1.customer_events_dual_clone_1
+  default_value: databricks-migrate-activity.schema1.customer_events
   evidence:
   - DATABRICKS_RUN
   - JOB_CALL_GRAPH

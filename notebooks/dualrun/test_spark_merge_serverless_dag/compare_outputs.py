@@ -6,16 +6,48 @@
 dbutils.widgets.text("dual_run_id", "", "Dual run ID")
 dbutils.widgets.text("project_name", "", "Project name")
 dbutils.widgets.text("report_root", "gs://{{ var.value.dual_run_bucket }}/dual_run/reports", "Report root")
+dbutils.widgets.text("compare_left_ref_0", "databricks-migrate-activity.schema1.customer_events_dual_clone_1", "customer_events left ref")
+dbutils.widgets.text("compare_right_ref_0", "databricks-migrate-activity.schema1.customer_events_dual_clone_2", "customer_events right ref")
+dbutils.widgets.text("compare_pairs_json", "[]", "Compare pairs JSON override")
+
+# COMMAND ----------
+
+COMPARE_PAIRS = [{'left_ref': '`databricks-migrate-activity`.schema1.customer_events_dual_clone_1', 'right_ref': '`databricks-migrate-activity`.schema1.customer_events_dual_clone_2', 'label': 'customer_events'}]
+COMPARE_CONFIG = {'enabled': True, 'report': {'root_uri': 'gs://{{ var.value.dual_run_bucket }}/dual_run/reports', 'summary_json': True, 'summary_markdown': True, 'summary_html': False, 'detail_format': 'parquet', 'write_audit_tables': True, 'audit_catalog': 'migration_audit', 'audit_schema': 'dualrun'}, 'row_details': {'enabled': True, 'max_issue_rows_per_table': None, 'max_sample_rows_in_summary': 100, 'include_full_row_json': True, 'include_column_diff_json': True, 'include_mismatch_columns': True, 'max_json_length': 100000}, 'comparison_rules': {'fail_on_duplicate_keys': True, 'ignored_columns': ['_commit_timestamp', '_commit_version', '_change_type', '_change_ordinal', 'run_id', 'load_ts', 'updated_at'], 'sensitive_columns': [], 'numeric_tolerances': {}, 'timestamp_tolerance_seconds': 0}, 'checks': {'enable_basic_stats': True, 'enable_null_stats': True, 'enable_distinct_stats': True, 'enable_numeric_stats': True, 'enable_datetime_stats': True, 'enable_distribution_stats': True, 'enable_row_comparison': True, 'enable_delta_operation_metrics': True, 'enable_delta_version_stats': True, 'enable_distribution_by_status': False}, 'filters': {'business_date': None, 'where_clause': None}, 'runtime': {'fail_process_on': ['FAIL', 'BLOCKED']}, 'numeric_columns': None}
+
+import json
+
+_pairs_override = dbutils.widgets.get("compare_pairs_json")
+if _pairs_override and str(_pairs_override).strip() not in ("", "[]"):
+    try:
+        _parsed_pairs = json.loads(_pairs_override)
+        if isinstance(_parsed_pairs, list) and _parsed_pairs:
+            COMPARE_PAIRS = _parsed_pairs
+    except json.JSONDecodeError:
+        pass
+
+_updated_pairs = []
+for _i, _pair in enumerate(COMPARE_PAIRS):
+    _row = dict(_pair)
+    try:
+        _left = dbutils.widgets.get(f"compare_left_ref_{_i}")
+        if _left and str(_left).strip():
+            _row["left_ref"] = _left
+    except Exception:
+        pass
+    try:
+        _right = dbutils.widgets.get(f"compare_right_ref_{_i}")
+        if _right and str(_right).strip():
+            _row["right_ref"] = _right
+    except Exception:
+        pass
+    _updated_pairs.append(_row)
+COMPARE_PAIRS = _updated_pairs
 
 dual_run_id = dbutils.widgets.get("dual_run_id")
 project_name = dbutils.widgets.get("project_name")
 report_root = dbutils.widgets.get("report_root").rstrip("/")
 report_path = f"{report_root}/project={project_name}/dual_run_id={dual_run_id}"
-
-# COMMAND ----------
-
-COMPARE_PAIRS = [{'left_ref': '`databricks-migrate-activity`.schema1.customer_events_dual_clone_1_dual_clone_1', 'right_ref': '`databricks-migrate-activity`.schema1.customer_events_dual_clone_1_dual_clone_2', 'label': 'customer_events_dual_clone_1'}]
-COMPARE_CONFIG = {'enabled': True, 'report': {'root_uri': 'gs://{{ var.value.dual_run_bucket }}/dual_run/reports', 'summary_json': True, 'summary_markdown': True, 'summary_html': False, 'detail_format': 'parquet', 'write_audit_tables': True, 'audit_catalog': 'migration_audit', 'audit_schema': 'dualrun'}, 'row_details': {'enabled': True, 'max_issue_rows_per_table': None, 'max_sample_rows_in_summary': 100, 'include_full_row_json': True, 'include_column_diff_json': True, 'include_mismatch_columns': True, 'max_json_length': 100000}, 'comparison_rules': {'fail_on_duplicate_keys': True, 'ignored_columns': ['_commit_timestamp', '_commit_version', '_change_type', '_change_ordinal', 'run_id', 'load_ts', 'updated_at'], 'sensitive_columns': [], 'numeric_tolerances': {}, 'timestamp_tolerance_seconds': 0}, 'checks': {'enable_basic_stats': True, 'enable_null_stats': True, 'enable_distinct_stats': True, 'enable_numeric_stats': True, 'enable_datetime_stats': True, 'enable_distribution_stats': True, 'enable_row_comparison': True, 'enable_delta_operation_metrics': True, 'enable_delta_version_stats': True, 'enable_distribution_by_status': False}, 'filters': {'business_date': None, 'where_clause': None}, 'runtime': {'fail_process_on': ['FAIL', 'BLOCKED']}, 'numeric_columns': None}
 
 checks = COMPARE_CONFIG.get("checks") or {}
 rules = COMPARE_CONFIG.get("comparison_rules") or {}

@@ -6,22 +6,33 @@
 from __future__ import annotations
 
 import json
+import os
 
 from pyspark.sql import SparkSession
 
 spark = SparkSession.builder.getOrCreate()
 
+TARGET_PARAMETERS = ["target-table"]
+
+
+def _widget(name: str, default: str = "") -> str:
+    try:
+        from pyspark.dbutils import DBUtils
+        raw = DBUtils().widgets.get(name)
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    except Exception:
+        pass
+    return str(os.environ.get(name, default) or default).strip()
+
 
 def _load_plan_json() -> dict:
-    import os
-    raw = os.environ.get("clone_plan_json", "{}")
-    if not raw or raw == "{}":
-        try:
-            from pyspark.dbutils import DBUtils
-            raw = DBUtils().widgets.get("clone_plan_json")
-        except Exception:
-            pass
-    return json.loads(raw or "{}")
+    raw = _widget("clone_plan_json", "{}")
+    try:
+        parsed = json.loads(raw or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 def _exists(fqn: str) -> bool:
@@ -31,9 +42,57 @@ def _exists(fqn: str) -> bool:
         return False
 
 
+def _clone_table_name(table_name: str, index: int, suffix: str) -> str:
+    return f"{table_name}{suffix}{index}"
+
+
+def _build_fallback_plan() -> dict:
+    suffix = _widget("clone_suffix", "_dual_clone_") or "_dual_clone_"
+    catalog = _widget("catalog", "main") or "main"
+    clones = []
+    for param in TARGET_PARAMETERS:
+        ref = _widget(param, "")
+        if not ref:
+            continue
+        cleaned = ref.strip().strip("`").rstrip("/")
+        if cleaned.startswith(("gs://", "dbfs:", "s3://", "s3a://", "file:///")):
+            table_leaf = cleaned.rsplit("/", 1)[-1]
+            for index in (1, 2):
+                clone_path = f"{cleaned.rsplit('/', 1)[0]}/{_clone_table_name(table_leaf, index, suffix)}"
+                clones.append({
+                    "target": {"fqn": clone_path, "index": index},
+                    "sql": f"SELECT 1 /* path clone placeholder for {clone_path} */",
+                    "skip_if_exists": False,
+                })
+            continue
+        parts = cleaned.split(".")
+        if len(parts) == 3:
+            cat, schema, table_name = parts
+            source_ref = f"`{cat}`.{schema}.{table_name}"
+            for index in (1, 2):
+                clone_table = _clone_table_name(table_name, index, suffix)
+                clone_fqn = f"{cat}.{schema}.{clone_table}"
+                clones.append({
+                    "target": {"fqn": clone_fqn, "index": index},
+                    "sql": (
+                        f"CREATE TABLE IF NOT EXISTS `{cat}`.{schema}.{clone_table}\n"
+                        f"DEEP CLONE {source_ref}"
+                    ),
+                    "skip_if_exists": True,
+                })
+    return {"clones": clones, "preamble_cells": []}
+
+
 plan_data = _load_plan_json()
+if not plan_data.get("clones"):
+    plan_data = _build_fallback_plan()
+
+# Preamble cells define names such as resolved_clone_locations; share one namespace
+# across exec() and clone execution (isolated exec() locals are not visible here).
+_runtime_ns = {"spark": spark, "json": json}
+
 for cell in plan_data.get("preamble_cells") or []:
-    exec(cell, {"spark": spark, "json": json})
+    exec(cell, _runtime_ns)
 
 for clone_item in plan_data.get("clones") or []:
     target = clone_item.get("target") or {}
@@ -50,8 +109,12 @@ for clone_item in plan_data.get("clones") or []:
         schema = (source.get("source_schema") or "").strip("`")
         table_name = source.get("table_name") or ""
         source_ref = f"`{catalog}`.{schema}.{table_name}" if catalog else source.get("ref", "")
-        target_ref = f"`{catalog}`.{schema}.{fqn.rsplit('.', 1)[-1]}" if catalog and "." in fqn else fqn
-        location = resolved_clone_locations[index]
+        target_ref = (
+            f"`{catalog}`.{schema}.{fqn.rsplit('.', 1)[-1]}"
+            if catalog and "." in fqn
+            else fqn
+        )
+        location = _runtime_ns["resolved_clone_locations"][index]
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {target_ref}\n"
             f"DEEP CLONE {source_ref}\n"

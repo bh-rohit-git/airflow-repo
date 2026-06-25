@@ -13,7 +13,7 @@ from airflow.providers.databricks.operators.databricks import DatabricksSubmitRu
 
 DATABRICKS_CONN_ID = "databricks_default"
 # Patched at deploy time by build-deploy-dags (DATABRICKS_WORKSPACE_BASE GitHub var).
-DATABRICKS_WORKSPACE_BASE = "dbfs:/FileStore/dualrun"
+DATABRICKS_WORKSPACE_BASE = "/Volumes/databricks-migrate-activity/schema1/dualrun"
 
 default_args = {
     "owner": "data-platform",
@@ -23,7 +23,7 @@ default_args = {
 }
 
 from airflow.models.param import Param
-from airflow.operators.python import BranchPythonOperator, PythonOperator
+from airflow.operators.python import PythonOperator
 
 SOURCE_DAG_CONF = {}
 MIGRATED_DAG_CONF = {}
@@ -31,22 +31,10 @@ DAG_PARAMS = {
     "project_name": Param(default="", type="string"),
     "catalog": Param(default="databricks-migrate-activity", type="string"),
     "clone_suffix": Param(default="_dual_clone_", type="string"),
-    "source_clone_suffix": Param(default="_source_clone", type="string"),
-    "use_mock_source": Param(default=False, type="boolean"),
-    "mock_row_count": Param(default=1000, type="integer"),
-    "mock_format": Param(default="csv", type="string"),
     "input-path": Param(default="databricks-8259550742932689-unitycatalog/8259550742932689/incoming/customer_events_merge.csv", type="string"),
     "merge-key": Param(default="id", type="string"),
-    "target-table": Param(default="databricks-migrate-activity.schema1.customer_events_dual_clone_1", type="string"),
+    "target-table": Param(default="databricks-migrate-activity.schema1.customer_events", type="string"),
 }
-
-
-def _use_mock_source(**context):
-    dag_run = context.get("dag_run")
-    conf = (dag_run.conf if dag_run else None) or {}
-    if "use_mock_source" in conf:
-        return bool(conf.get("use_mock_source"))
-    return bool((context.get("params") or {}).get("use_mock_source"))
 
 
 def _resolve_branch_conf(branch: str, default: dict, **context):
@@ -63,12 +51,8 @@ def _resolve_branch_conf(branch: str, default: dict, **context):
             "project_name",
             "catalog",
             "clone_suffix",
-            "source_clone_suffix",
-            "use_mock_source",
-            "mock_row_count",
-            "mock_format",
-            "mock_config",
-        ):
+            "compare_pairs_json",
+        ) or str(name).startswith("compare_left_ref_") or str(name).startswith("compare_right_ref_"):
             continue
         if isinstance(value, (str, int, float, bool)):
             merged[name] = value
@@ -88,10 +72,6 @@ def _trigger_child_dag(target_dag_id: str, branch: str, default_conf: dict, wait
         wait_for_completion=wait,
         replace_microseconds=False,
     )
-
-
-def _route_mock_source(**context):
-    return "mock_source_data" if _use_mock_source(**context) else "ensure_dualrun_clones"
 
 
 def _serverless_notebook_task(
@@ -133,28 +113,13 @@ with DAG(
     tags=["dual-run", "bh-migrate", "test_spark_merge_serverless_dag"],
     params=DAG_PARAMS,
 ) as dag:
-    route_mock_source = BranchPythonOperator(
-        task_id="route_mock_source",
-        python_callable=_route_mock_source,
-    )
-
-    mock_source_data = DatabricksSubmitRunOperator(
-        task_id="mock_source_data",
-        databricks_conn_id=DATABRICKS_CONN_ID,
-        json=_serverless_notebook_task(
-            "mock_source_data",
-            "notebooks/dualrun/test_spark_merge_serverless_dag/mock_source_data.py",
-            {"source_specs_json": "{{ (dag_run.conf or {}).get('source_specs_json', '[]') }}"},
-        ),
-    )
-
     ensure_dualrun_clones = DatabricksSubmitRunOperator(
         task_id="ensure_dualrun_clones",
         databricks_conn_id=DATABRICKS_CONN_ID,
         json=_serverless_notebook_task(
             "ensure_clones",
             f"{DATABRICKS_WORKSPACE_BASE}/test_spark_merge_serverless_dag/ensure_clones.py",
-            {"clone_plan_json": "{{ (dag_run.conf or {}).get('clone_plan_json', '{}') }}"},
+            {'clone_plan_json': "{{ (dag_run.conf or {}).get('clone_plan_json', '{}') }}", 'clone_suffix': '{{ (dag_run.conf or {}).get("clone_suffix") or params.get("clone_suffix", "_dual_clone_") }}', 'catalog': '{{ (dag_run.conf or {}).get("catalog") or params.get("catalog", "databricks-migrate-activity") }}', 'input-path': '{{ (dag_run.conf or {}).get("input-path") or params.get("input-path", "") }}', 'merge-key': '{{ (dag_run.conf or {}).get("merge-key") or params.get("merge-key", "") }}', 'target-table': '{{ (dag_run.conf or {}).get("target-table") or params.get("target-table", "") }}'},
         ),
     )
 
@@ -186,11 +151,9 @@ with DAG(
         json=_serverless_notebook_task(
             "compare_outputs",
             f"{DATABRICKS_WORKSPACE_BASE}/test_spark_merge_serverless_dag/compare_outputs.py",
-            {'dual_run_id': "{{ (dag_run.conf or {}).get('dual_run_id', dag_run.run_id) }}", 'project_name': "{{ (dag_run.conf or {}).get('project_name', dag.dag_id) }}", 'report_root': 'gs://{{ var.value.dual_run_bucket }}/dual_run/reports'},
+            {'dual_run_id': "{{ (dag_run.conf or {}).get('dual_run_id', dag_run.run_id) }}", 'project_name': "{{ (dag_run.conf or {}).get('project_name', dag.dag_id) }}", 'report_root': 'gs://{{ var.value.dual_run_bucket }}/dual_run/reports', 'compare_pairs_json': '{{ (dag_run.conf or {}).get("compare_pairs_json") or params.get("compare_pairs_json", "[{\\"left_ref\\":\\"databricks-migrate-activity.schema1.customer_events_dual_clone_1\\",\\"right_ref\\":\\"databricks-migrate-activity.schema1.customer_events_dual_clone_2\\",\\"label\\":\\"customer_events\\"}]") }}', 'compare_left_ref_0': '{{ (dag_run.conf or {}).get("compare_left_ref_0") or params.get("compare_left_ref_0", "databricks-migrate-activity.schema1.customer_events_dual_clone_1") }}', 'compare_right_ref_0': '{{ (dag_run.conf or {}).get("compare_right_ref_0") or params.get("compare_right_ref_0", "databricks-migrate-activity.schema1.customer_events_dual_clone_2") }}'},
         ),
     )
 
-    route_mock_source >> [mock_source_data, ensure_dualrun_clones]
-    mock_source_data >> ensure_dualrun_clones
     ensure_dualrun_clones >> [trigger_source_dag, trigger_migrated_dag]
     [trigger_source_dag, trigger_migrated_dag] >> compare_dualrun_outputs
