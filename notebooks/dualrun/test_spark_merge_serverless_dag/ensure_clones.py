@@ -87,8 +87,12 @@ plan_data = _load_plan_json()
 if not plan_data.get("clones"):
     plan_data = _build_fallback_plan()
 
+# Preamble cells define names such as resolved_clone_locations; share one namespace
+# across exec() and clone execution (isolated exec() locals are not visible here).
+_runtime_ns = {"spark": spark, "json": json}
+
 for cell in plan_data.get("preamble_cells") or []:
-    exec(cell, {"spark": spark, "json": json})
+    exec(cell, _runtime_ns)
 
 for clone_item in plan_data.get("clones") or []:
     target = clone_item.get("target") or {}
@@ -110,7 +114,7 @@ for clone_item in plan_data.get("clones") or []:
             if catalog and "." in fqn
             else fqn
         )
-        location = resolved_clone_locations[index]
+        location = _runtime_ns["resolved_clone_locations"][index]
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {target_ref}\n"
             f"DEEP CLONE {source_ref}\n"

@@ -13,7 +13,7 @@ from airflow.providers.databricks.operators.databricks import DatabricksSubmitRu
 
 DATABRICKS_CONN_ID = "databricks_default"
 # Patched at deploy time by build-deploy-dags (DATABRICKS_WORKSPACE_BASE GitHub var).
-DATABRICKS_WORKSPACE_BASE = "dbfs:/FileStore/dualrun"
+DATABRICKS_WORKSPACE_BASE = "/Volumes/databricks-migrate-activity/schema1/dualrun"
 
 default_args = {
     "owner": "data-platform",
@@ -23,7 +23,7 @@ default_args = {
 }
 
 from airflow.models.param import Param
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
 SOURCE_DAG_CONF = {}
 MIGRATED_DAG_CONF = {}
@@ -35,43 +35,6 @@ DAG_PARAMS = {
     "merge-key": Param(default="id", type="string"),
     "target-table": Param(default="databricks-migrate-activity.schema1.customer_events", type="string"),
 }
-
-
-def _resolve_branch_conf(branch: str, default: dict, **context):
-    dag_run = context.get("dag_run")
-    conf = (dag_run.conf if dag_run else None) or {}
-    key = "source_branch_conf" if branch == "source" else "migrated_branch_conf"
-    override = conf.get(key)
-    if isinstance(override, dict):
-        return override
-    merged = dict(default)
-    params = context.get("params") or {}
-    for name, value in params.items():
-        if name in (
-            "project_name",
-            "catalog",
-            "clone_suffix",
-            "compare_pairs_json",
-        ) or str(name).startswith("compare_left_ref_") or str(name).startswith("compare_right_ref_"):
-            continue
-        if isinstance(value, (str, int, float, bool)):
-            merged[name] = value
-            underscored = str(name).replace("-", "_")
-            if underscored != name:
-                merged[underscored] = value
-    return merged
-
-
-def _trigger_child_dag(target_dag_id: str, branch: str, default_conf: dict, wait: bool, **context):
-    from airflow.api.common.trigger_dag import trigger_dag
-
-    conf = _resolve_branch_conf(branch, default_conf, **context)
-    trigger_dag(
-        dag_id=target_dag_id,
-        run_conf=conf,
-        wait_for_completion=wait,
-        replace_microseconds=False,
-    )
 
 
 def _serverless_notebook_task(
@@ -112,6 +75,7 @@ with DAG(
     catchup=False,
     tags=["dual-run", "bh-migrate", "test_spark_merge_serverless_dag"],
     params=DAG_PARAMS,
+    render_template_as_native_obj=True,
 ) as dag:
     ensure_dualrun_clones = DatabricksSubmitRunOperator(
         task_id="ensure_dualrun_clones",
@@ -123,26 +87,22 @@ with DAG(
         ),
     )
 
-    trigger_source_dag = PythonOperator(
+trigger_source_dag = TriggerDagRunOperator(
         task_id="trigger_source_dag",
-        python_callable=_trigger_child_dag,
-        op_kwargs={
-            "target_dag_id": "test_spark_merge_serverless_dag",
-            "branch": "source",
-            "default_conf": SOURCE_DAG_CONF,
-            "wait": True,
-        },
+        trigger_dag_id="test_spark_merge_serverless_dag",
+        conf="{{ dag_run.conf.get('source_branch_conf') or dict() }}",
+        wait_for_completion=True,
+        allowed_states=["success"],
+        failed_states=["failed"],
     )
 
-    trigger_migrated_dag = PythonOperator(
+    trigger_migrated_dag = TriggerDagRunOperator(
         task_id="trigger_migrated_dag",
-        python_callable=_trigger_child_dag,
-        op_kwargs={
-            "target_dag_id": "migrated_test_spark_merge_serverless_dag",
-            "branch": "migrated",
-            "default_conf": MIGRATED_DAG_CONF,
-            "wait": True,
-        },
+        trigger_dag_id="migrated_test_spark_merge_serverless_dag",
+        conf="{{ dag_run.conf.get('migrated_branch_conf') or dict() }}",
+        wait_for_completion=True,
+        allowed_states=["success"],
+        failed_states=["failed"],
     )
 
     compare_dualrun_outputs = DatabricksSubmitRunOperator(
