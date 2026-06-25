@@ -87,7 +87,7 @@ with DAG(
         ),
     )
 
-trigger_source_dag = TriggerDagRunOperator(
+    trigger_source_dag = TriggerDagRunOperator(
         task_id="trigger_source_dag",
         trigger_dag_id="test_spark_merge_serverless_dag",
         conf="{{ dag_run.conf.get('source_branch_conf') or dict() }}",
