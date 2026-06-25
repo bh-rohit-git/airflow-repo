@@ -13,7 +13,7 @@ from airflow.providers.databricks.operators.databricks import DatabricksSubmitRu
 
 DATABRICKS_CONN_ID = "databricks_default"
 # Patched at deploy time by build-deploy-dags (DATABRICKS_WORKSPACE_BASE GitHub var).
-DATABRICKS_WORKSPACE_BASE = "dbfs:/FileStore/dualrun"
+DATABRICKS_WORKSPACE_BASE = "/Volumes/databricks-migrate-activity/schema1/dualrun"
 
 default_args = {
     "owner": "data-platform",
