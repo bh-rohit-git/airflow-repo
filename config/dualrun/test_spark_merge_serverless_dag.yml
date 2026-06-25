@@ -63,7 +63,7 @@ compare_results_path: gs://{{ var.value.dual_run_bucket }}/dual_run/reports/comp
 run_parameters:
 - parameter: input-path
   role: source
-  default_value: databricks-8259550742932689-unitycatalog/8259550742932689/incoming/customer_events_merge.csv
+  default_value: gs://databricks-8259550742932689-unitycatalog/8259550742932689/incoming/customer_events_merge.csv
   evidence:
   - DATABRICKS_RUN
   - JOB_CALL_GRAPH

@@ -9,8 +9,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from airflow import DAG
-from airflow.providers.databricks.operators.databricks import DatabricksSubmitRunOperator
-
 DATABRICKS_CONN_ID = "databricks_default"
 # Patched at deploy time by build-deploy-dags (DATABRICKS_WORKSPACE_BASE GitHub var).
 DATABRICKS_WORKSPACE_BASE = "/Volumes/databricks-migrate-activity/schema1/dualrun"
@@ -22,7 +20,10 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
+import json
+
 from airflow.models.param import Param
+from airflow.providers.databricks.operators.databricks import DatabricksSubmitRunOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
 SOURCE_DAG_CONF = {}
@@ -31,10 +32,62 @@ DAG_PARAMS = {
     "project_name": Param(default="", type="string"),
     "catalog": Param(default="databricks-migrate-activity", type="string"),
     "clone_suffix": Param(default="_dual_clone_", type="string"),
-    "input-path": Param(default="databricks-8259550742932689-unitycatalog/8259550742932689/incoming/customer_events_merge.csv", type="string"),
+    "input-path": Param(default="gs://databricks-8259550742932689-unitycatalog/8259550742932689/incoming/customer_events_merge.csv", type="string"),
     "merge-key": Param(default="id", type="string"),
     "target-table": Param(default="databricks-migrate-activity.schema1.customer_events", type="string"),
 }
+
+def stringify_widget_params(params: dict[str, Any] | None) -> dict[str, str]:
+    """Coerce notebook widget values to strings for the Databricks jobs API."""
+    if not params:
+        return {}
+    out: dict[str, str] = {}
+    for key, value in params.items():
+        if value is None:
+            out[key] = ""
+        elif isinstance(value, str):
+            out[key] = value
+        else:
+            out[key] = json.dumps(value, separators=(",", ":"))
+    return out
+
+
+def coerce_databricks_submit_json(payload: dict[str, Any]) -> dict[str, Any]:
+    """Stringify notebook widget params in a Databricks submit-run payload."""
+    out = dict(payload)
+    notebook_task = out.get("notebook_task")
+    if isinstance(notebook_task, dict) and notebook_task.get("base_parameters") is not None:
+        task = dict(notebook_task)
+        task["base_parameters"] = stringify_widget_params(task.get("base_parameters"))
+        out["notebook_task"] = task
+
+    tasks = out.get("tasks")
+    if isinstance(tasks, list):
+        coerced_tasks: list[Any] = []
+        for item in tasks:
+            if not isinstance(item, dict):
+                coerced_tasks.append(item)
+                continue
+            task = dict(item)
+            nested = task.get("notebook_task")
+            if isinstance(nested, dict) and nested.get("base_parameters") is not None:
+                notebook = dict(nested)
+                notebook["base_parameters"] = stringify_widget_params(notebook.get("base_parameters"))
+                task["notebook_task"] = notebook
+            coerced_tasks.append(task)
+        out["tasks"] = coerced_tasks
+    return out
+
+
+class DualRunDatabricksSubmitRunOperator(DatabricksSubmitRunOperator):
+    """Submit Databricks notebook runs with string widget params (post-Jinja)."""
+
+    render_template_as_native_obj = False
+
+    def execute(self, context):
+        if isinstance(self.json, dict):
+            self.json = coerce_databricks_submit_json(self.json)
+        return super().execute(context)
 
 
 def _serverless_notebook_task(
@@ -77,13 +130,13 @@ with DAG(
     params=DAG_PARAMS,
     render_template_as_native_obj=True,
 ) as dag:
-    ensure_dualrun_clones = DatabricksSubmitRunOperator(
+    ensure_dualrun_clones = DualRunDatabricksSubmitRunOperator(
         task_id="ensure_dualrun_clones",
         databricks_conn_id=DATABRICKS_CONN_ID,
         json=_serverless_notebook_task(
             "ensure_clones",
             f"{DATABRICKS_WORKSPACE_BASE}/test_spark_merge_serverless_dag/ensure_clones.py",
-            {'clone_plan_json': "{{ (dag_run.conf or {}).get('clone_plan_json', '{}') }}", 'clone_suffix': '{{ (dag_run.conf or {}).get("clone_suffix") or params.get("clone_suffix", "_dual_clone_") }}', 'catalog': '{{ (dag_run.conf or {}).get("catalog") or params.get("catalog", "databricks-migrate-activity") }}', 'input-path': '{{ (dag_run.conf or {}).get("input-path") or params.get("input-path", "") }}', 'merge-key': '{{ (dag_run.conf or {}).get("merge-key") or params.get("merge-key", "") }}', 'target-table': '{{ (dag_run.conf or {}).get("target-table") or params.get("target-table", "") }}'},
+            {'clone_plan_json': '{% set _v = (dag_run.conf or {}).get("clone_plan_json", "{}") %}{{ _v if _v is string else (_v | tojson) }}', 'clone_suffix': '{% set _v = (dag_run.conf or {}).get("clone_suffix") or (dag_run.conf or {}).get("source_branch_conf", {}).get("clone_suffix") or params.get("clone_suffix", "_dual_clone_") %}{{ _v if _v is string else (_v | tojson) }}', 'catalog': '{% set _v = (dag_run.conf or {}).get("catalog") or (dag_run.conf or {}).get("source_branch_conf", {}).get("catalog") or params.get("catalog", "databricks-migrate-activity") %}{{ _v if _v is string else (_v | tojson) }}', 'input-path': '{% set _v = (dag_run.conf or {}).get("input-path") or (dag_run.conf or {}).get("source_branch_conf", {}).get("input-path") or params.get("input-path", "") %}{{ _v if _v is string else (_v | tojson) }}', 'merge-key': '{% set _v = (dag_run.conf or {}).get("merge-key") or (dag_run.conf or {}).get("source_branch_conf", {}).get("merge-key") or params.get("merge-key", "") %}{{ _v if _v is string else (_v | tojson) }}', 'target-table': '{% set _v = (dag_run.conf or {}).get("target-table") or (dag_run.conf or {}).get("source_branch_conf", {}).get("target-table") or params.get("target-table", "") %}{{ _v if _v is string else (_v | tojson) }}'},
         ),
     )
 
@@ -105,13 +158,13 @@ with DAG(
         failed_states=["failed"],
     )
 
-    compare_dualrun_outputs = DatabricksSubmitRunOperator(
+    compare_dualrun_outputs = DualRunDatabricksSubmitRunOperator(
         task_id="compare_dualrun_outputs",
         databricks_conn_id=DATABRICKS_CONN_ID,
         json=_serverless_notebook_task(
             "compare_outputs",
             f"{DATABRICKS_WORKSPACE_BASE}/test_spark_merge_serverless_dag/compare_outputs.py",
-            {'dual_run_id': "{{ (dag_run.conf or {}).get('dual_run_id', dag_run.run_id) }}", 'project_name': "{{ (dag_run.conf or {}).get('project_name', dag.dag_id) }}", 'report_root': 'gs://{{ var.value.dual_run_bucket }}/dual_run/reports', 'compare_pairs_json': '{{ (dag_run.conf or {}).get("compare_pairs_json") or params.get("compare_pairs_json", "[{\\"left_ref\\":\\"databricks-migrate-activity.schema1.customer_events_dual_clone_1\\",\\"right_ref\\":\\"databricks-migrate-activity.schema1.customer_events_dual_clone_2\\",\\"label\\":\\"customer_events\\"}]") }}', 'compare_left_ref_0': '{{ (dag_run.conf or {}).get("compare_left_ref_0") or params.get("compare_left_ref_0", "databricks-migrate-activity.schema1.customer_events_dual_clone_1") }}', 'compare_right_ref_0': '{{ (dag_run.conf or {}).get("compare_right_ref_0") or params.get("compare_right_ref_0", "databricks-migrate-activity.schema1.customer_events_dual_clone_2") }}'},
+            {'dual_run_id': "{{ (dag_run.conf or {}).get('dual_run_id', dag_run.run_id) }}", 'project_name': "{{ (dag_run.conf or {}).get('project_name', dag.dag_id) }}", 'report_root': 'gs://{{ var.value.dual_run_bucket }}/dual_run/reports', 'compare_pairs_json': '{% set _v = (dag_run.conf or {}).get("compare_pairs_json") or params.get("compare_pairs_json", "[{\\"left_ref\\":\\"databricks-migrate-activity.schema1.customer_events_dual_clone_1\\",\\"right_ref\\":\\"databricks-migrate-activity.schema1.customer_events_dual_clone_2\\",\\"label\\":\\"customer_events\\"}]") %}{{ _v if _v is string else (_v | tojson) }}', 'compare_left_ref_0': '{% set _v = (dag_run.conf or {}).get("compare_left_ref_0") or params.get("compare_left_ref_0", "databricks-migrate-activity.schema1.customer_events_dual_clone_1") %}{{ _v if _v is string else (_v | tojson) }}', 'compare_right_ref_0': '{% set _v = (dag_run.conf or {}).get("compare_right_ref_0") or params.get("compare_right_ref_0", "databricks-migrate-activity.schema1.customer_events_dual_clone_2") %}{{ _v if _v is string else (_v | tojson) }}'},
         ),
     )
 
