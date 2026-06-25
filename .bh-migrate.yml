@@ -1,0 +1,19 @@
+exclude:
+- '**/legacy/**'
+- '**/.git/**'
+- '**/migrated/**'
+- '**/testresults*/**'
+include:
+- dags/**/*.py
+quality:
+  build:
+    mode: compile
+  lint:
+    auto_fix: true
+validation:
+  data_dir: data
+  widget_defaults:
+    min_churn_score: '0.55'
+    multiplier: '1.2'
+    region: ALL
+    run_mode: full
