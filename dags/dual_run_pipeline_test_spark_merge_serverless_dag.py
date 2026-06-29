@@ -140,6 +140,16 @@ with DAG(
         ),
     )
 
+    mock_source_data = DualRunDatabricksSubmitRunOperator(
+        task_id="mock_source_data",
+        databricks_conn_id=DATABRICKS_CONN_ID,
+        json=_serverless_notebook_task(
+            "mock_source_data",
+            f"{DATABRICKS_WORKSPACE_BASE}/test_spark_merge_serverless_dag/mock_source_data.py",
+            {'source_specs_json': '{% set _v = (dag_run.conf or {}).get("source_specs_json", "[]") %}{{ _v if _v is string else (_v | tojson) }}', 'use_mock_source': '{% set _v = (dag_run.conf or {}).get("use_mock_source") or (dag_run.conf or {}).get("source_branch_conf", {}).get("use_mock_source") or params.get("use_mock_source", "false") %}{{ _v if _v is string else (_v | tojson) }}', 'mock_config': '{% set _v = (dag_run.conf or {}).get("mock_config", "{}") %}{{ _v if _v is string else (_v | tojson) }}'},
+        ),
+    )
+
     trigger_source_dag = TriggerDagRunOperator(
         task_id="trigger_source_dag",
         trigger_dag_id="test_spark_merge_serverless_dag",
@@ -168,5 +178,5 @@ with DAG(
         ),
     )
 
-    ensure_dualrun_clones >> [trigger_source_dag, trigger_migrated_dag]
+    ensure_dualrun_clones >> mock_source_data >> [trigger_source_dag, trigger_migrated_dag]
     [trigger_source_dag, trigger_migrated_dag] >> compare_dualrun_outputs

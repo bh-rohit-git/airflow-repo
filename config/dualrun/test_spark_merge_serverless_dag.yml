@@ -96,9 +96,12 @@ run_parameters:
   mockable: true
   schema_hint: null
 mock_source:
-  enabled: false
+  enabled: true
+  notebook: notebooks/dualrun/test_spark_merge_serverless_dag/mock_source_data.py
   mock_row_count: 1000
   mock_format: csv
+  sample_size: 100
+mock_notebook: notebooks/dualrun/test_spark_merge_serverless_dag/mock_source_data.py
 tokens:
   clone_suffix: _dual_clone_
-  source_clone_suffix: _source_clone
+  source_mock_suffix: _source_mock
