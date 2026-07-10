@@ -1,13 +1,7 @@
 """
 Airflow DAG: submit Job 1 (Pub/Sub → bronze_orders) as a serverless Databricks JAR task.
 
-Serverless Pub/Sub auth — set Airflow Variable (required):
-  pubsub_service_credential = <Unity Catalog service credential name>
-  Example: gcp-pubsub
-
-Idle timeout:
-  - Trigger config: {"idle_timeout": "5 minutes"}
-  - Or DAG param (default "2 minutes")
+Trigger with JSON conf (see run_raw_order_ingestion_trigger_conf.example.json) or use DAG param defaults.
 """
 
 from __future__ import annotations
@@ -29,6 +23,7 @@ SERVERLESS_ENV_VERSION = "4"
 GCP_PROJECT = "nprd-bh-use1-dev"
 PUBSUB_TOPIC = "order-events"
 PUBSUB_SUBSCRIPTION = "order-events-databricks"
+PUBSUB_SERVICE_CREDENTIAL = "gcp-pubsub"
 BRONZE_TABLE = "`databricks-migrate-activity`.schema1.bronze_orders"
 CHECKPOINT_LOCATION = (
     "gs://bh-migrate-poc-bucket/pubsub-setup/checkpoints/bronze_orders_pubsub"
@@ -40,43 +35,45 @@ UC_JAR_PATH = (
 TRIGGER_INTERVAL = "30 seconds"
 DEFAULT_IDLE_TIMEOUT = "2 minutes"
 SAFETY_TIMEOUT_SECONDS = 7200
+RUN_NAME = "raw-order-ingestion-pubsub-serverless"
+PERFORMANCE_TARGET = "PERFORMANCE_OPTIMIZED"
+
+
+def _conf_or_param(key: str) -> str:
+    """Resolve trigger conf override with DAG param fallback."""
+    return f"{{{{ dag_run.conf.get('{key}', params.{key}) }}}}"
 
 
 def build_serverless_jar_payload() -> dict:
-    """Payload for jobs/runs/submit.
-
-    pubsub_service_credential and idle_timeout are resolved at task runtime
-    from Airflow Variables / DAG params (Jinja templates).
-    """
+    """Payload for jobs/runs/submit."""
     parameters = [
         "--gcp-project",
-        GCP_PROJECT,
+        _conf_or_param("gcp_project"),
         "--topic-id",
-        PUBSUB_TOPIC,
+        _conf_or_param("pubsub_topic"),
         "--subscription-id",
-        PUBSUB_SUBSCRIPTION,
+        _conf_or_param("pubsub_subscription"),
         "--target-table",
-        BRONZE_TABLE,
+        _conf_or_param("bronze_table"),
         "--checkpoint-location",
-        CHECKPOINT_LOCATION,
+        _conf_or_param("checkpoint_location"),
         "--trigger-interval",
-        TRIGGER_INTERVAL,
+        _conf_or_param("trigger_interval"),
         "--idle-timeout",
-        "{{ dag_run.conf.get('idle_timeout') or params.idle_timeout }}",
-        # UC service credential name from Airflow Variable (Admin → Variables)
+        _conf_or_param("idle_timeout"),
         "--service-credential",
-        "{{ var.value.pubsub_service_credential }}",
+        _conf_or_param("pubsub_service_credential"),
     ]
 
     return {
-        "run_name": "raw-order-ingestion-pubsub-serverless",
-        "timeout_seconds": SAFETY_TIMEOUT_SECONDS,
-        "performance_target": "PERFORMANCE_OPTIMIZED",
+        "run_name": _conf_or_param("run_name"),
+        "timeout_seconds": _conf_or_param("safety_timeout_seconds"),
+        "performance_target": _conf_or_param("performance_target"),
         "tasks": [
             {
                 "task_key": "raw_order_ingestion",
                 "spark_jar_task": {
-                    "main_class_name": MAIN_CLASS,
+                    "main_class_name": _conf_or_param("main_class"),
                     "parameters": parameters,
                 },
                 "environment_key": "jar_env",
@@ -86,8 +83,8 @@ def build_serverless_jar_payload() -> dict:
             {
                 "environment_key": "jar_env",
                 "spec": {
-                    "environment_version": SERVERLESS_ENV_VERSION,
-                    "java_dependencies": [UC_JAR_PATH],
+                    "environment_version": _conf_or_param("serverless_env_version"),
+                    "java_dependencies": [_conf_or_param("uc_jar_path")],
                 },
             }
         ],
@@ -102,14 +99,78 @@ with DAG(
     catchup=False,
     tags=["databricks", "pubsub", "streaming", "serverless"],
     params={
+        "gcp_project": Param(
+            GCP_PROJECT,
+            type="string",
+            description="GCP project id for Pub/Sub (JAR --gcp-project)",
+        ),
+        "pubsub_topic": Param(
+            PUBSUB_TOPIC,
+            type="string",
+            description="Pub/Sub topic id (JAR --topic-id)",
+        ),
+        "pubsub_subscription": Param(
+            PUBSUB_SUBSCRIPTION,
+            type="string",
+            description="Pub/Sub subscription id (JAR --subscription-id)",
+        ),
+        "bronze_table": Param(
+            BRONZE_TABLE,
+            type="string",
+            description="Bronze Delta target table (JAR --target-table)",
+        ),
+        "checkpoint_location": Param(
+            CHECKPOINT_LOCATION,
+            type="string",
+            description="GCS checkpoint path for structured streaming",
+        ),
+        "trigger_interval": Param(
+            TRIGGER_INTERVAL,
+            type="string",
+            description="Spark micro-batch trigger (e.g. '30 seconds', '1 minute')",
+        ),
         "idle_timeout": Param(
             DEFAULT_IDLE_TIMEOUT,
             type="string",
             description=(
                 "Stop Spark after this long with no Pub/Sub input "
-                "(e.g. '2 minutes', '5 minutes'). "
-                'Trigger conf: {"idle_timeout": "5 minutes"}'
+                "(e.g. '2 minutes', '5 minutes')"
             ),
+        ),
+        "pubsub_service_credential": Param(
+            PUBSUB_SERVICE_CREDENTIAL,
+            type="string",
+            description="Unity Catalog service credential name for Pub/Sub auth (JAR --service-credential)",
+        ),
+        "main_class": Param(
+            MAIN_CLASS,
+            type="string",
+            description="Databricks JAR entrypoint main class",
+        ),
+        "uc_jar_path": Param(
+            UC_JAR_PATH,
+            type="string",
+            description="Unity Catalog volume path to the assembly JAR",
+        ),
+        "serverless_env_version": Param(
+            SERVERLESS_ENV_VERSION,
+            type="string",
+            description="Databricks serverless environment version",
+        ),
+        "safety_timeout_seconds": Param(
+            SAFETY_TIMEOUT_SECONDS,
+            type="integer",
+            description="Databricks job run safety timeout in seconds",
+        ),
+        "run_name": Param(
+            RUN_NAME,
+            type="string",
+            description="Databricks jobs/runs/submit run_name",
+        ),
+        "performance_target": Param(
+            PERFORMANCE_TARGET,
+            type="string",
+            description="Serverless performance target (e.g. PERFORMANCE_OPTIMIZED)",
         ),
     },
 ) as dag:
