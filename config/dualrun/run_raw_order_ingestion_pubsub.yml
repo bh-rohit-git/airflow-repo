@@ -1,0 +1,171 @@
+runtime_notebooks: true
+catalog: databricks-migrate-activity
+sources:
+- databricks-migrate-activity.schema1.bronze_orders
+clone_notebook: notebooks/dualrun/run_raw_order_ingestion_pubsub/ensure_clones.py
+compare_notebook: notebooks/dualrun/run_raw_order_ingestion_pubsub/compare_outputs.py
+compare_pairs:
+- left_ref: databricks-migrate-activity.schema1.bronze_orders_dual_clone_1
+  right_ref: databricks-migrate-activity.schema1.bronze_orders_dual_clone_2
+  label: bronze_orders
+compare_config:
+  enabled: true
+  report:
+    root_uri: gs://{{ var.value.dual_run_bucket }}/dual_run/reports
+    summary_json: true
+    summary_markdown: true
+    summary_html: false
+    detail_format: delta
+    write_audit_tables: true
+    audit_catalog: migration_audit
+    audit_schema: dualrun
+  row_details:
+    enabled: true
+    max_issue_rows_per_table: null
+    max_sample_rows_in_summary: 100
+    include_full_row_json: true
+    include_column_diff_json: true
+    include_mismatch_columns: true
+    max_json_length: 100000
+  comparison_rules:
+    fail_on_duplicate_keys: true
+    ignored_columns:
+    - _commit_timestamp
+    - _commit_version
+    - _change_type
+    - _change_ordinal
+    - run_id
+    - load_ts
+    - updated_at
+    sensitive_columns: []
+    numeric_tolerances: {}
+    timestamp_tolerance_seconds: 0
+  checks:
+    enable_basic_stats: true
+    enable_null_stats: true
+    enable_distinct_stats: true
+    enable_numeric_stats: true
+    enable_datetime_stats: true
+    enable_distribution_stats: true
+    enable_row_comparison: true
+    enable_delta_operation_metrics: true
+    enable_delta_version_stats: true
+    enable_distribution_by_status: false
+  filters:
+    business_date: null
+    where_clause: null
+  runtime:
+    fail_process_on:
+    - FAIL
+    - BLOCKED
+  numeric_columns: null
+compare_results_path: gs://{{ var.value.dual_run_bucket }}/dual_run/reports/compare_results.json
+run_parameters:
+- parameter: checkpoint-location
+  role: other
+  default_value: gs://bh-migrate-poc-bucket/pubsub-setup/checkpoints/bronze_orders_pubsub
+  evidence:
+  - STATIC_DEFAULT
+  required: false
+  parameter_type: null
+  inferred_type: null
+  mockable: false
+  schema_hint: null
+  dag_run_parameter: checkpoint_location
+- parameter: gcp-project
+  role: other
+  default_value: nprd-bh-use1-dev
+  evidence:
+  - STATIC_DEFAULT
+  required: false
+  parameter_type: null
+  inferred_type: null
+  mockable: false
+  schema_hint: null
+  dag_run_parameter: gcp_project
+- parameter: idle-timeout
+  role: other
+  default_value: 2 minutes
+  evidence:
+  - STATIC_DEFAULT
+  required: false
+  parameter_type: null
+  inferred_type: null
+  mockable: false
+  schema_hint: null
+  dag_run_parameter: idle_timeout
+- parameter: service-credential
+  role: other
+  default_value: gcp-pubsub
+  evidence:
+  - STATIC_DEFAULT
+  required: false
+  parameter_type: null
+  inferred_type: null
+  mockable: false
+  schema_hint: null
+  dag_run_parameter: pubsub_service_credential
+- parameter: subscription-id
+  role: other
+  default_value: order-events-databricks
+  evidence:
+  - STATIC_DEFAULT
+  required: false
+  parameter_type: null
+  inferred_type: null
+  mockable: false
+  schema_hint: null
+  dag_run_parameter: pubsub_subscription
+- parameter: topic-id
+  role: other
+  default_value: order-events
+  evidence:
+  - STATIC_DEFAULT
+  required: false
+  parameter_type: null
+  inferred_type: null
+  mockable: false
+  schema_hint: null
+  dag_run_parameter: pubsub_topic
+- parameter: trigger-interval
+  role: other
+  default_value: 30 seconds
+  evidence:
+  - STATIC_DEFAULT
+  required: false
+  parameter_type: null
+  inferred_type: null
+  mockable: false
+  schema_hint: null
+  dag_run_parameter: trigger_interval
+- parameter: target_table
+  role: target
+  default_value: databricks-migrate-activity.schema1.bronze_orders
+  evidence:
+  - JOB_CALL_GRAPH
+  - STATIC_DEFAULT
+  required: true
+  parameter_type: null
+  inferred_type: null
+  mockable: true
+  schema_hint: null
+  dag_run_parameter: bronze_table
+mock_source:
+  enabled: true
+  notebook: notebooks/dualrun/run_raw_order_ingestion_pubsub/mock_source_data.py
+  mock_row_count: 1000
+  mock_format: csv
+  sample_size: 100
+mock_notebook: notebooks/dualrun/run_raw_order_ingestion_pubsub/mock_source_data.py
+tokens:
+  clone_suffix: _dual_clone_
+  source_mock_suffix: _source_mock
+dualrun_dags:
+  parent_dag_id: dualrun_RawOrderIngestionMain_cb0e9d4643d0
+  unmigrated_child_dag_id: dualrun_child_unmigrated_RawOrderIngestionMain_cb0e9d4643d0
+  migrated_child_dag_id: dualrun_child_migrated_RawOrderIngestionMain_cb0e9d4643d0
+  parent_relpath: dags/dualrun/dualrun_RawOrderIngestionMain_cb0e9d4643d0.py
+  unmigrated_child_relpath: dags/dualrun/dualrun_child_unmigrated_RawOrderIngestionMain_cb0e9d4643d0.py
+  migrated_child_relpath: dags/dualrun/dualrun_child_migrated_RawOrderIngestionMain_cb0e9d4643d0.py
+  production_source_dag_id: run_raw_order_ingestion_pubsub
+  production_migrated_dag_id: migrated_run_raw_order_ingestion_pubsub
