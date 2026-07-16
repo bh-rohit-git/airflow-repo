@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 DATABRICKS_CONN_ID = "databricks_default"
 # Patched at deploy time by build-deploy-dags (DATABRICKS_WORKSPACE_BASE GitHub var).
-DATABRICKS_WORKSPACE_BASE = "dbfs:/FileStore/dualrun"
+DATABRICKS_WORKSPACE_BASE = "/Volumes/databricks-migrate-activity/schema1/dualrun"
 
 default_args = {
     "owner": "data-platform",
@@ -36,9 +36,9 @@ DAG_PARAMS = {
     "gcp-project": Param(default="nprd-bh-use1-dev", type="string"),
     "idle-timeout": Param(default="2 minutes", type="string"),
     "service-credential": Param(default="gcp-pubsub", type="string"),
+    "trigger-interval": Param(default="30 seconds", type="string"),
     "subscription-id": Param(default="order-events-databricks", type="string"),
     "topic-id": Param(default="order-events", type="string"),
-    "trigger-interval": Param(default="30 seconds", type="string"),
     "target_table": Param(default="databricks-migrate-activity.schema1.bronze_orders", type="string"),
 }
 

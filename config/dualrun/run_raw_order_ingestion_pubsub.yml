@@ -105,28 +105,6 @@ run_parameters:
   mockable: false
   schema_hint: null
   dag_run_parameter: pubsub_service_credential
-- parameter: subscription-id
-  role: other
-  default_value: order-events-databricks
-  evidence:
-  - STATIC_DEFAULT
-  required: false
-  parameter_type: null
-  inferred_type: null
-  mockable: false
-  schema_hint: null
-  dag_run_parameter: pubsub_subscription
-- parameter: topic-id
-  role: other
-  default_value: order-events
-  evidence:
-  - STATIC_DEFAULT
-  required: false
-  parameter_type: null
-  inferred_type: null
-  mockable: false
-  schema_hint: null
-  dag_run_parameter: pubsub_topic
 - parameter: trigger-interval
   role: other
   default_value: 30 seconds
@@ -138,6 +116,28 @@ run_parameters:
   mockable: false
   schema_hint: null
   dag_run_parameter: trigger_interval
+- parameter: subscription-id
+  role: source
+  default_value: order-events-databricks
+  evidence:
+  - STATIC_DEFAULT
+  required: false
+  parameter_type: null
+  inferred_type: null
+  mockable: true
+  schema_hint: null
+  dag_run_parameter: pubsub_subscription
+- parameter: topic-id
+  role: source
+  default_value: order-events
+  evidence:
+  - STATIC_DEFAULT
+  required: false
+  parameter_type: null
+  inferred_type: null
+  mockable: true
+  schema_hint: null
+  dag_run_parameter: pubsub_topic
 - parameter: target_table
   role: target
   default_value: databricks-migrate-activity.schema1.bronze_orders
