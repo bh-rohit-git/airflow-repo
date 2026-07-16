@@ -64,7 +64,7 @@ class TypedDataprocCreateClusterOperator(DataprocCreateClusterOperator):
         return super().execute(context)
 from pathlib import Path
 import yaml
-PUBSUB_LANDING_URI = 'gs://BUCKET/pubsub-landing/orders'
+PUBSUB_LANDING_URI = 'gs://bh-migrate-poc-bucket/pubsub-setup/orders/'
 _ENV_CONFIG_PATH = Path(__file__).resolve().parent.parent / 'plugins' / 'config_dev.yml'
 _DAG_SIZING_PATH = Path(__file__).resolve().parent.parent / 'plugins' / 'run_order_enrichment_bronze_to_silver_cluster_config.yml'
 if not _ENV_CONFIG_PATH.is_file():
@@ -94,7 +94,7 @@ BRONZE_TABLE = '`databricks-migrate-activity`.schema1.bronze_orders'
 CUSTOMER_TABLE = '`databricks-migrate-activity`.schema1.customers'
 SILVER_TABLE = '`databricks-migrate-activity`.schema1.silver_orders'
 CHECKPOINT_LOCATION = 'gs://bh-migrate-poc-bucket/pubsub-setup/checkpoints/silver_orders'
-UC_JAR_PATH = '/Volumes/databricks-migrate-activity/schema1/jars/databricks-structured-streaming-assembly-0.1.0.jar'
+UC_JAR_PATH = 'gs://bh-migrate-poc-bucket/dataproc-setup/jars/dataproc-structured-streaming-assembly-0.1.0.jar'
 TRIGGER_INTERVAL = '1 minute'
 DEFAULT_IDLE_TIMEOUT = '2 minutes'
 SAFETY_TIMEOUT_SECONDS = 7200
