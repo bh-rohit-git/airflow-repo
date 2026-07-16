@@ -62,16 +62,16 @@ compare_config:
 compare_results_path: gs://{{ var.value.dual_run_bucket }}/dual_run/reports/compare_results.json
 run_parameters:
 - parameter: checkpoint-location
-  role: source
+  role: other
   default_value: gs://bh-migrate-poc-bucket/pubsub-setup/checkpoints/bronze_orders_pubsub
   evidence:
-  - DATABRICKS_RUN
+  - STATIC_DEFAULT
   required: false
   parameter_type: null
   inferred_type: null
-  mockable: true
+  mockable: false
   schema_hint: null
-  dag_run_parameter: null
+  dag_run_parameter: checkpoint_location
 - parameter: gcp-project
   role: source
   default_value: nprd-bh-use1-dev
