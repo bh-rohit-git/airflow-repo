@@ -9,6 +9,7 @@ Trigger with JSON conf (see run_order_enrichment_trigger_conf.example.json) or u
 from __future__ import annotations
 from datetime import datetime
 from airflow import DAG
+from airflow.providers.databricks.operators.databricks import DatabricksSubmitRunOperator
 from airflow.providers.google.cloud.operators.dataproc import DataprocSubmitJobOperator
 from airflow.providers.google.cloud.operators.dataproc import DataprocCreateClusterOperator, DataprocDeleteClusterOperator
 import copy
