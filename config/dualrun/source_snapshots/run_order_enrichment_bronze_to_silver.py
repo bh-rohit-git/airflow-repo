@@ -88,7 +88,7 @@ def build_serverless_jar_payload() -> dict:
 
 
 with DAG(
-    dag_id="dualrun_child_unmigrated_OrderEnrichmentMain_7fd8484b8a47",
+    dag_id="run_order_enrichment_bronze_to_silver",
     description="Serverless JAR: bronze_orders → silver_orders (stops after idle timeout)",
     start_date=datetime(2025, 1, 1),
     schedule=None,
