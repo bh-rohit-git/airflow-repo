@@ -1,0 +1,967 @@
+# Databricks notebook source
+# Shared dual-run compare (bh-migrate) — all group input via widgets / base_parameters
+
+# COMMAND ----------
+
+dbutils.widgets.text("dual_run_id", "", "Dual run ID")
+dbutils.widgets.text("project_name", "", "Project name")
+dbutils.widgets.text("group_id", "", "Group ID")
+dbutils.widgets.text("report_root", "", "Report root")
+dbutils.widgets.text("compare_pairs_json", "[]", "Compare pairs JSON")
+dbutils.widgets.text("compare_config_json", "{}", "Compare config JSON")
+
+# COMMAND ----------
+
+import json
+
+
+def _load_json_widget(name: str, default):
+    raw = dbutils.widgets.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return default
+    return parsed if parsed is not None else default
+
+
+COMPARE_PAIRS = _load_json_widget("compare_pairs_json", [])
+COMPARE_CONFIG = _load_json_widget("compare_config_json", {})
+if not isinstance(COMPARE_PAIRS, list):
+    COMPARE_PAIRS = []
+if not isinstance(COMPARE_CONFIG, dict):
+    COMPARE_CONFIG = {}
+if not COMPARE_PAIRS:
+    dbutils.notebook.exit('{"status":"skipped","reason":"no_compare_pairs"}')
+
+dual_run_id = dbutils.widgets.get("dual_run_id")
+project_name = dbutils.widgets.get("project_name")
+group_id = dbutils.widgets.get("group_id")
+report_root = (dbutils.widgets.get("report_root") or "").rstrip("/")
+summary_run_root = f"{report_root}/summary/group_id={group_id}/run_id={dual_run_id}"
+details_run_root = f"{report_root}/details/group_id={group_id}/run_id={dual_run_id}"
+distribution_run_root = (
+    f"{report_root}/distribution_summary/group_id={group_id}/run_id={dual_run_id}"
+)
+
+checks = COMPARE_CONFIG.get("checks") or {}
+rules = COMPARE_CONFIG.get("comparison_rules") or {}
+filters = COMPARE_CONFIG.get("filters") or {}
+detail_format = (COMPARE_CONFIG.get("report") or {}).get("detail_format") or "parquet"
+where_clause = filters.get("where_clause")
+where_sql = f" WHERE {where_clause}" if where_clause else ""
+
+# COMMAND ----------
+
+import json
+
+from pyspark.sql import functions as F
+
+summary = []
+row_issue_dfs = []
+distribution_detail_dfs = []
+_severity_order = {"PASS": 0, "SKIPPED": 0, "NOT_APPLICABLE": 0, "WARN": 1, "REVIEW": 2, "BLOCKED": 3, "FAIL": 4}
+
+
+def _filter_present_columns(columns, left_columns, right_columns):
+    found = [c for c in columns if c in left_columns and c in right_columns]
+    missing = [c for c in columns if c not in found]
+    return found, missing
+
+
+def _spark_temporal_columns(schema_fields):
+    from pyspark.sql.types import DateType, TimestampType
+
+    return {
+        field.name
+        for field in schema_fields
+        if isinstance(field.dataType, (DateType, TimestampType))
+    }
+
+
+def _hash_comparable_columns(left_df, right_df, pair):
+    ignored = set(pair.get("ignored_columns") or [])
+    temporal = set(pair.get("date_columns") or []) | set(pair.get("timestamp_columns") or [])
+    temporal |= _spark_temporal_columns(left_df.schema.fields)
+    temporal |= _spark_temporal_columns(right_df.schema.fields)
+    if pair.get("comparable_columns"):
+        return [
+            c
+            for c in pair["comparable_columns"]
+            if c not in ignored and c not in temporal
+        ]
+    return sorted((set(left_df.columns) & set(right_df.columns)) - ignored - temporal)
+
+
+def _append_distribution_rows(table_label, check_id, dimension_key, rows):
+    if not rows:
+        return
+    normalized = []
+    for row in rows:
+        if dimension_key == "event_date":
+            dimension_value = str(row.get("event_date"))
+        elif dimension_key == "partition":
+            dimension_value = json.dumps(row.get("partition"), default=str)
+        elif dimension_key == "status":
+            dimension_value = str(row.get("status"))
+        else:
+            dimension_value = json.dumps(row, default=str)
+        normalized.append(
+            {
+                "table_label": table_label,
+                "check_id": check_id,
+                "dimension_key": dimension_key,
+                "dimension_value": dimension_value,
+                "left_count": int(row.get("left_count", 0)),
+                "right_count": int(row.get("right_count", 0)),
+                "delta": int(row.get("delta", 0)),
+            }
+        )
+    distribution_detail_dfs.append(spark.createDataFrame(normalized))
+
+for pair in COMPARE_PAIRS:
+    label = pair.get("label") or pair["left_ref"]
+    left_ref = pair["left_ref"]
+    right_ref = pair["right_ref"]
+    key_columns = pair.get("key_columns") or []
+    partition_columns = pair.get("partition_columns") or []
+    numeric_columns = pair.get("numeric_columns") or COMPARE_CONFIG.get("numeric_columns") or []
+    date_columns = pair.get("date_columns") or []
+    timestamp_columns = pair.get("timestamp_columns") or []
+    status_column = pair.get("status_column")
+    fail_dup_keys = rules.get("fail_on_duplicate_keys", True)
+
+    if left_ref.startswith(("gs://", "dbfs:", "s3a://", "s3://", "abfss://", "wasbs://")):
+        left_table = f"delta.`{left_ref}`"
+    elif left_ref.strip().startswith("`") and "`." in left_ref:
+        left_table = left_ref
+    else:
+        _left_parts = left_ref.strip().split(".")
+        left_table = (
+            f"`{_left_parts[0].strip('`')}`.{_left_parts[1]}.{_left_parts[2]}"
+            if len(_left_parts) == 3
+            else left_ref
+        )
+    if right_ref.startswith(("gs://", "dbfs:", "s3a://", "s3://", "abfss://", "wasbs://")):
+        right_table = f"delta.`{right_ref}`"
+    elif right_ref.strip().startswith("`") and "`." in right_ref:
+        right_table = right_ref
+    else:
+        _right_parts = right_ref.strip().split(".")
+        right_table = (
+            f"`{_right_parts[0].strip('`')}`.{_right_parts[1]}.{_right_parts[2]}"
+            if len(_right_parts) == 3
+            else right_ref
+        )
+
+    left_df = spark.sql(f"SELECT * FROM {left_table}{where_sql}")
+    right_df = spark.sql(f"SELECT * FROM {right_table}{where_sql}")
+    left_count = left_df.count()
+    right_count = right_df.count()
+    row_delta = right_count - left_count
+
+    if checks.get("enable_basic_stats", True):
+        summary.append(
+            {
+                "check_id": "basic.row_count",
+                "pair_label": label,
+                "severity": "FAIL" if row_delta != 0 else "PASS",
+                "metrics": {
+                    "left_count": left_count,
+                    "right_count": right_count,
+                    "delta": row_delta,
+                    "delta_pct": (row_delta / left_count) if left_count else 0.0,
+                },
+            }
+        )
+
+        left_schema_rows = spark.sql(f"DESCRIBE TABLE {left_table}").collect()
+        right_schema_rows = spark.sql(f"DESCRIBE TABLE {right_table}").collect()
+        left_cols = [
+            r.col_name for r in left_schema_rows if r.col_name and not str(r.col_name).startswith("#")
+        ]
+        right_cols = [
+            r.col_name for r in right_schema_rows if r.col_name and not str(r.col_name).startswith("#")
+        ]
+        col_delta = len(right_cols) - len(left_cols)
+        schema_match = left_schema_rows == right_schema_rows
+
+        summary.append(
+            {
+                "check_id": "basic.column_count",
+                "pair_label": label,
+                "severity": "FAIL" if col_delta != 0 else "PASS",
+                "metrics": {
+                    "left_columns": len(left_cols),
+                    "right_columns": len(right_cols),
+                    "delta": col_delta,
+                },
+            }
+        )
+        summary.append(
+            {
+                "check_id": "basic.schema_equality",
+                "pair_label": label,
+                "severity": "FAIL" if not schema_match else "PASS",
+                "metrics": {
+                    "schema_match": schema_match,
+                    "missing_columns_in_right": sorted(set(left_cols) - set(right_cols)),
+                    "extra_columns_in_right": sorted(set(right_cols) - set(left_cols)),
+                    "order_mismatches": left_cols != right_cols,
+                },
+            }
+        )
+
+        try:
+            left_partitions = list(
+                spark.sql(f"DESCRIBE DETAIL {left_table}").select("partitionColumns").first()[0] or []
+            )
+            right_partitions = list(
+                spark.sql(f"DESCRIBE DETAIL {right_table}").select("partitionColumns").first()[0] or []
+            )
+            partition_match = left_partitions == right_partitions
+            summary.append(
+                {
+                    "check_id": "basic.partition_columns",
+                    "pair_label": label,
+                    "severity": "WARN" if partition_match is False else "PASS",
+                    "metrics": {
+                        "left_partitions": left_partitions,
+                        "right_partitions": right_partitions,
+                        "partition_match": partition_match,
+                    },
+                }
+            )
+        except Exception as exc:
+            summary.append(
+                {
+                    "check_id": "basic.partition_columns",
+                    "pair_label": label,
+                    "severity": "BLOCKED",
+                    "message": str(exc),
+                    "metrics": {},
+                }
+            )
+
+    if checks.get("enable_null_stats", True):
+        null_columns = sorted(set(left_df.columns) & set(right_df.columns))
+        null_count_metrics = {}
+        null_pct_metrics = {}
+        for col in null_columns:
+            ln = left_df.select(F.sum(F.col(col).isNull().cast("int")).alias("c")).first()[0] or 0
+            rn = right_df.select(F.sum(F.col(col).isNull().cast("int")).alias("c")).first()[0] or 0
+            null_count_metrics[col] = {
+                "left_nulls": int(ln),
+                "right_nulls": int(rn),
+                "delta": int(rn) - int(ln),
+            }
+            null_pct_metrics[col] = {
+                "left_null_pct": float(ln) / left_count if left_count else 0.0,
+                "right_null_pct": float(rn) / right_count if right_count else 0.0,
+                "delta_pct": (float(rn) / right_count if right_count else 0.0)
+                - (float(ln) / left_count if left_count else 0.0),
+            }
+        newly_introduced = [
+            c for c in null_columns if null_count_metrics[c]["right_nulls"] > null_count_metrics[c]["left_nulls"]
+        ]
+        summary.append(
+            {
+                "check_id": "nulls.count_per_column",
+                "pair_label": label,
+                "severity": "REVIEW"
+                if any(v["delta"] != 0 for v in null_count_metrics.values())
+                else "PASS",
+                "metrics": {"columns": null_count_metrics},
+            }
+        )
+        summary.append(
+            {
+                "check_id": "nulls.percentage_per_column",
+                "pair_label": label,
+                "severity": "REVIEW"
+                if any(v["delta_pct"] != 0 for v in null_pct_metrics.values())
+                else "PASS",
+                "metrics": {"columns": null_pct_metrics},
+            }
+        )
+        summary.append(
+            {
+                "check_id": "nulls.newly_introduced",
+                "pair_label": label,
+                "severity": "REVIEW" if newly_introduced else "PASS",
+                "metrics": {"newly_introduced_null_columns": newly_introduced},
+            }
+        )
+
+    if checks.get("enable_distinct_stats", True):
+        distinct_columns = sorted(set(left_df.columns) & set(right_df.columns))
+        distinct_metrics = {}
+        for col in distinct_columns:
+            ld = left_df.select(col).distinct().count()
+            rd = right_df.select(col).distinct().count()
+            distinct_metrics[col] = {"left_distinct": ld, "right_distinct": rd, "delta": rd - ld}
+        summary.append(
+            {
+                "check_id": "distinct.column_counts",
+                "pair_label": label,
+                "severity": "REVIEW"
+                if any(v["delta"] != 0 for v in distinct_metrics.values())
+                else "PASS",
+                "metrics": {"columns": distinct_metrics},
+            }
+        )
+        if key_columns:
+            left_cols = set(left_df.columns)
+            right_cols = set(right_df.columns)
+            found_keys, missing_keys = _filter_present_columns(key_columns, left_cols, right_cols)
+            if not found_keys:
+                msg = f"key_columns not found: {', '.join(missing_keys)}"
+                summary.append(
+                    {
+                        "check_id": "keys.distinct_key_count",
+                        "pair_label": label,
+                        "severity": "NOT_APPLICABLE",
+                        "message": msg,
+                        "metrics": {},
+                    }
+                )
+                summary.append(
+                    {
+                        "check_id": "keys.duplicate_count",
+                        "pair_label": label,
+                        "severity": "NOT_APPLICABLE",
+                        "message": msg,
+                        "metrics": {},
+                    }
+                )
+            else:
+                left_distinct_keys = left_df.select(
+                    F.countDistinct(F.struct(*[F.col(k) for k in found_keys])).alias("c")
+                ).first()[0]
+                right_distinct_keys = right_df.select(
+                    F.countDistinct(F.struct(*[F.col(k) for k in found_keys])).alias("c")
+                ).first()[0]
+                key_delta = int(right_distinct_keys) - int(left_distinct_keys)
+                dup_left = left_df.groupBy(*found_keys).count().filter(F.col("count") > 1).count()
+                dup_right = right_df.groupBy(*found_keys).count().filter(F.col("count") > 1).count()
+                summary.append(
+                    {
+                        "check_id": "keys.distinct_key_count",
+                        "pair_label": label,
+                        "severity": "FAIL" if key_delta != 0 else "PASS",
+                        "metrics": {
+                            "left_distinct_keys": int(left_distinct_keys),
+                            "right_distinct_keys": int(right_distinct_keys),
+                            "delta": key_delta,
+                        },
+                    }
+                )
+                dup_severity = "PASS"
+                if dup_left or dup_right:
+                    dup_severity = "FAIL" if fail_dup_keys else "WARN"
+                summary.append(
+                    {
+                        "check_id": "keys.duplicate_count",
+                        "pair_label": label,
+                        "severity": dup_severity,
+                        "metrics": {
+                            "duplicate_keys_left": dup_left,
+                            "duplicate_keys_right": dup_right,
+                        },
+                    }
+                )
+        else:
+            summary.append(
+                {
+                    "check_id": "keys.distinct_key_count",
+                    "pair_label": label,
+                    "severity": "NOT_APPLICABLE",
+                    "message": "key_columns not configured",
+                    "metrics": {},
+                }
+            )
+            summary.append(
+                {
+                    "check_id": "keys.duplicate_count",
+                    "pair_label": label,
+                    "severity": "NOT_APPLICABLE",
+                    "message": "key_columns not configured",
+                    "metrics": {},
+                }
+            )
+
+    if checks.get("enable_numeric_stats", True):
+        if numeric_columns:
+            numeric_metrics = {}
+            for col in numeric_columns:
+                if col not in left_df.columns or col not in right_df.columns:
+                    continue
+                ls = left_df.select(
+                    F.sum(col).alias("sum"),
+                    F.min(col).alias("min"),
+                    F.max(col).alias("max"),
+                    F.avg(col).alias("avg"),
+                ).first()
+                rs = right_df.select(
+                    F.sum(col).alias("sum"),
+                    F.min(col).alias("min"),
+                    F.max(col).alias("max"),
+                    F.avg(col).alias("avg"),
+                ).first()
+                numeric_metrics[col] = {
+                    "left_sum": float(ls["sum"] or 0),
+                    "right_sum": float(rs["sum"] or 0),
+                    "sum_delta": float((rs["sum"] or 0) - (ls["sum"] or 0)),
+                    "left_min": float(ls["min"] or 0),
+                    "right_min": float(rs["min"] or 0),
+                    "left_max": float(ls["max"] or 0),
+                    "right_max": float(rs["max"] or 0),
+                    "left_avg": float(ls["avg"] or 0),
+                    "right_avg": float(rs["avg"] or 0),
+                }
+            num_severity = "PASS"
+            for stats in numeric_metrics.values():
+                if stats["sum_delta"] != 0:
+                    num_severity = "REVIEW"
+                    break
+            summary.append(
+                {
+                    "check_id": "numeric.aggregates",
+                    "pair_label": label,
+                    "severity": num_severity,
+                    "metrics": {"columns": numeric_metrics},
+                }
+            )
+        else:
+            summary.append(
+                {
+                    "check_id": "numeric.aggregates",
+                    "pair_label": label,
+                    "severity": "BLOCKED",
+                    "message": "numeric_columns not provided",
+                    "metrics": {},
+                }
+            )
+
+    if checks.get("enable_datetime_stats", True):
+        range_cols = list(dict.fromkeys(date_columns + timestamp_columns))
+        left_cols = set(left_df.columns)
+        right_cols = set(right_df.columns)
+        if not range_cols:
+            summary.append(
+                {
+                    "check_id": "datetime.range",
+                    "pair_label": label,
+                    "severity": "NOT_APPLICABLE",
+                    "message": "datetime_columns not configured",
+                    "metrics": {},
+                }
+            )
+            summary.append(
+                {
+                    "check_id": "datetime.count_by_date",
+                    "pair_label": label,
+                    "severity": "NOT_APPLICABLE",
+                    "message": "no date column available for count_by_date",
+                    "metrics": {},
+                }
+            )
+        else:
+            found_range, missing_range = _filter_present_columns(range_cols, left_cols, right_cols)
+            if missing_range:
+                msg = f"datetime_columns not found: {', '.join(missing_range)}"
+                summary.append(
+                    {
+                        "check_id": "datetime.range",
+                        "pair_label": label,
+                        "severity": "NOT_APPLICABLE",
+                        "message": msg,
+                        "metrics": {},
+                    }
+                )
+                summary.append(
+                    {
+                        "check_id": "datetime.count_by_date",
+                        "pair_label": label,
+                        "severity": "NOT_APPLICABLE",
+                        "message": msg,
+                        "metrics": {},
+                    }
+                )
+            else:
+                range_metrics = {}
+                for col in found_range:
+                    lr = left_df.select(F.min(col).alias("min"), F.max(col).alias("max")).first()
+                    rr = right_df.select(F.min(col).alias("min"), F.max(col).alias("max")).first()
+                    range_metrics[col] = {
+                        "left_min": str(lr["min"]),
+                        "right_min": str(rr["min"]),
+                        "left_max": str(lr["max"]),
+                        "right_max": str(rr["max"]),
+                    }
+                range_severity = "REVIEW" if any(
+                    v["left_min"] != v["right_min"] or v["left_max"] != v["right_max"]
+                    for v in range_metrics.values()
+                ) else "PASS"
+                summary.append(
+                    {
+                        "check_id": "datetime.range",
+                        "pair_label": label,
+                        "severity": range_severity,
+                        "metrics": {"columns": range_metrics},
+                    }
+                )
+
+                if not date_columns:
+                    summary.append(
+                        {
+                            "check_id": "datetime.count_by_date",
+                            "pair_label": label,
+                            "severity": "NOT_APPLICABLE",
+                            "message": "no date column available for count_by_date",
+                            "metrics": {},
+                        }
+                    )
+                else:
+                    found_dates, missing_dates = _filter_present_columns(
+                        date_columns, left_cols, right_cols
+                    )
+                    if not found_dates:
+                        msg = f"datetime_columns not found: {', '.join(missing_dates)}"
+                        summary.append(
+                            {
+                                "check_id": "datetime.count_by_date",
+                                "pair_label": label,
+                                "severity": "NOT_APPLICABLE",
+                                "message": msg,
+                                "metrics": {},
+                            }
+                        )
+                    else:
+                        date_col = found_dates[0]
+                        left_date_counts = {
+                            str(r[date_col]): int(r["count"])
+                            for r in left_df.groupBy(date_col).count().collect()
+                        }
+                        right_date_counts = {
+                            str(r[date_col]): int(r["count"])
+                            for r in right_df.groupBy(date_col).count().collect()
+                        }
+                        mismatched_dates = []
+                        for d in sorted(set(left_date_counts) | set(right_date_counts)):
+                            lc = left_date_counts.get(d, 0)
+                            rc = right_date_counts.get(d, 0)
+                            if lc != rc:
+                                mismatched_dates.append(
+                                    {
+                                        "event_date": d,
+                                        "left_count": lc,
+                                        "right_count": rc,
+                                        "delta": rc - lc,
+                                    }
+                                )
+                        if mismatched_dates:
+                            _append_distribution_rows(
+                                label,
+                                "datetime.count_by_date",
+                                "event_date",
+                                mismatched_dates,
+                            )
+                        summary.append(
+                            {
+                                "check_id": "datetime.count_by_date",
+                                "pair_label": label,
+                                "severity": "FAIL" if mismatched_dates else "PASS",
+                                "metrics": {
+                                    "date_column": date_col,
+                                    "mismatched_dates": mismatched_dates,
+                                },
+                            }
+                        )
+
+    if checks.get("enable_distribution_stats", True):
+        if partition_columns:
+            left_part_counts = {
+                tuple(str(r[c]) for c in partition_columns): int(r["count"])
+                for r in left_df.groupBy(*partition_columns).count().collect()
+            }
+            right_part_counts = {
+                tuple(str(r[c]) for c in partition_columns): int(r["count"])
+                for r in right_df.groupBy(*partition_columns).count().collect()
+            }
+            mismatched_partitions = []
+            for part in sorted(set(left_part_counts) | set(right_part_counts)):
+                lc = left_part_counts.get(part, 0)
+                rc = right_part_counts.get(part, 0)
+                if lc != rc:
+                    mismatched_partitions.append(
+                        {
+                            "partition": {partition_columns[i]: part[i] for i in range(len(partition_columns))},
+                            "left_count": lc,
+                            "right_count": rc,
+                            "delta": rc - lc,
+                        }
+                    )
+            if mismatched_partitions:
+                _append_distribution_rows(
+                    label,
+                    "distribution.by_partition",
+                    "partition",
+                    mismatched_partitions,
+                )
+            part_severity = "PASS"
+            if mismatched_partitions:
+                part_severity = "FAIL" if (left_count - right_count) else "REVIEW"
+            summary.append(
+                {
+                    "check_id": "distribution.by_partition",
+                    "pair_label": label,
+                    "severity": part_severity,
+                    "metrics": {
+                        "partition_columns": partition_columns,
+                        "mismatched_partitions": mismatched_partitions,
+                        "row_count_delta": left_count - right_count,
+                    },
+                }
+            )
+        else:
+            summary.append(
+                {
+                    "check_id": "distribution.by_partition",
+                    "pair_label": label,
+                    "severity": "BLOCKED",
+                    "message": "partition_columns not provided",
+                    "metrics": {},
+                }
+            )
+
+        if checks.get("enable_distribution_by_status", False):
+            if status_column:
+                left_status_counts = {
+                    str(r[status_column]): int(r["count"])
+                    for r in left_df.groupBy(status_column).count().collect()
+                }
+                right_status_counts = {
+                    str(r[status_column]): int(r["count"])
+                    for r in right_df.groupBy(status_column).count().collect()
+                }
+                mismatched_statuses = []
+                for st in sorted(set(left_status_counts) | set(right_status_counts)):
+                    lc = left_status_counts.get(st, 0)
+                    rc = right_status_counts.get(st, 0)
+                    if lc != rc:
+                        mismatched_statuses.append(
+                            {"status": st, "left_count": lc, "right_count": rc, "delta": rc - lc}
+                        )
+                if mismatched_statuses:
+                    _append_distribution_rows(
+                        label,
+                        "distribution.by_status",
+                        "status",
+                        mismatched_statuses,
+                    )
+                summary.append(
+                    {
+                        "check_id": "distribution.by_status",
+                        "pair_label": label,
+                        "severity": "REVIEW" if mismatched_statuses else "PASS",
+                        "metrics": {
+                            "status_column": status_column,
+                            "mismatched_statuses": mismatched_statuses,
+                        },
+                    }
+                )
+            else:
+                summary.append(
+                    {
+                        "check_id": "distribution.by_status",
+                        "pair_label": label,
+                        "severity": "BLOCKED",
+                        "message": "status_column not provided",
+                        "metrics": {},
+                    }
+                )
+        else:
+            summary.append(
+                {
+                    "check_id": "distribution.by_status",
+                    "pair_label": label,
+                    "severity": "SKIPPED",
+                    "message": "enable_distribution_by_status is False",
+                    "metrics": {},
+                }
+            )
+
+    if checks.get("enable_row_comparison", True):
+        if key_columns:
+            join_cond = [left_df[k].eqNullSafe(right_df[k]) for k in key_columns]
+            joined = left_df.alias("l").join(right_df.alias("r"), on=join_cond, how="full_outer")
+            missing_in_right = joined.filter(
+                F.col(f"l.{key_columns[0]}").isNotNull() & F.col(f"r.{key_columns[0]}").isNull()
+            ).count()
+            extra_in_right = joined.filter(
+                F.col(f"l.{key_columns[0]}").isNull() & F.col(f"r.{key_columns[0]}").isNotNull()
+            ).count()
+            matched_rows = joined.filter(
+                F.col(f"l.{key_columns[0]}").isNotNull() & F.col(f"r.{key_columns[0]}").isNotNull()
+            ).count()
+            duplicate_keys_left = left_df.groupBy(*key_columns).count().filter(F.col("count") > 1).count()
+            duplicate_keys_right = right_df.groupBy(*key_columns).count().filter(F.col("count") > 1).count()
+            mismatched_rows = 0
+
+            missing_df = left_df.join(right_df, key_columns, "left_anti")
+            extra_df = right_df.join(left_df, key_columns, "left_anti")
+            if missing_df.count() > 0:
+                row_issue_dfs.append(
+                    missing_df.withColumn("dual_run_id", F.lit(dual_run_id))
+                    .withColumn("table_label", F.lit(label))
+                    .withColumn("issue_type", F.lit("missing_in_right"))
+                    .withColumn("left_present", F.lit(True))
+                    .withColumn("right_present", F.lit(False))
+                )
+            if extra_df.count() > 0:
+                row_issue_dfs.append(
+                    extra_df.withColumn("dual_run_id", F.lit(dual_run_id))
+                    .withColumn("table_label", F.lit(label))
+                    .withColumn("issue_type", F.lit("extra_in_right"))
+                    .withColumn("left_present", F.lit(False))
+                    .withColumn("right_present", F.lit(True))
+                )
+
+            row_severity = "PASS"
+            if mismatched_rows or missing_in_right or extra_in_right:
+                row_severity = "FAIL"
+            if fail_dup_keys and (duplicate_keys_left or duplicate_keys_right):
+                row_severity = "FAIL"
+            summary.append(
+                {
+                    "check_id": "rows.key_based",
+                    "pair_label": label,
+                    "severity": row_severity,
+                    "metrics": {
+                        "matched_rows": matched_rows,
+                        "mismatched_rows": mismatched_rows,
+                        "missing_in_right": missing_in_right,
+                        "extra_in_right": extra_in_right,
+                        "duplicate_keys_left": duplicate_keys_left,
+                        "duplicate_keys_right": duplicate_keys_right,
+                    },
+                }
+            )
+        else:
+            comparable_cols = _hash_comparable_columns(left_df, right_df, pair)
+            left_hashes = left_df.select(
+                F.sha2(F.concat_ws("||", *[F.col(c).cast("string") for c in comparable_cols]), 256).alias(
+                    "row_hash"
+                )
+            ).groupBy("row_hash").count()
+            right_hashes = right_df.select(
+                F.sha2(F.concat_ws("||", *[F.col(c).cast("string") for c in comparable_cols]), 256).alias(
+                    "row_hash"
+                )
+            ).groupBy("row_hash").count()
+            hash_join = left_hashes.alias("l").join(right_hashes.alias("r"), on="row_hash", how="full_outer")
+            hash_only_left = hash_join.filter(
+                F.col("l.row_hash").isNotNull() & F.col("r.row_hash").isNull()
+            ).count()
+            hash_only_right = hash_join.filter(
+                F.col("l.row_hash").isNull() & F.col("r.row_hash").isNotNull()
+            ).count()
+            hash_count_mismatch = hash_join.filter(
+                F.col("l.row_hash").isNotNull()
+                & F.col("r.row_hash").isNotNull()
+                & (F.col("l.count") != F.col("r.count"))
+            ).count()
+            hash_in_both = hash_join.filter(
+                F.col("l.row_hash").isNotNull()
+                & F.col("r.row_hash").isNotNull()
+                & (F.col("l.count") == F.col("r.count"))
+            ).count()
+
+            hol_df = hash_join.filter(F.col("l.row_hash").isNotNull() & F.col("r.row_hash").isNull()).select(
+                F.lit(dual_run_id).alias("dual_run_id"),
+                F.lit(label).alias("table_label"),
+                F.lit("hash_only_left").alias("issue_type"),
+                F.col("l.row_hash").alias("row_hash"),
+                F.col("l.count").alias("left_count"),
+                F.lit(None).cast("long").alias("right_count"),
+            )
+            hor_df = hash_join.filter(F.col("l.row_hash").isNull() & F.col("r.row_hash").isNotNull()).select(
+                F.lit(dual_run_id).alias("dual_run_id"),
+                F.lit(label).alias("table_label"),
+                F.lit("hash_only_right").alias("issue_type"),
+                F.col("r.row_hash").alias("row_hash"),
+                F.lit(None).cast("long").alias("left_count"),
+                F.col("r.count").alias("right_count"),
+            )
+            if hol_df.count() > 0:
+                row_issue_dfs.append(hol_df)
+            if hor_df.count() > 0:
+                row_issue_dfs.append(hor_df)
+
+            hash_severity = "PASS"
+            if hash_only_left or hash_only_right or hash_count_mismatch:
+                hash_severity = "FAIL"
+            summary.append(
+                {
+                    "check_id": "rows.hash_based",
+                    "pair_label": label,
+                    "severity": hash_severity,
+                    "metrics": {
+                        "hash_in_both": hash_in_both,
+                        "hash_only_left": hash_only_left,
+                        "hash_only_right": hash_only_right,
+                        "hash_count_mismatch": hash_count_mismatch,
+                    },
+                }
+            )
+
+    if checks.get("enable_delta_operation_metrics", True):
+        try:
+            left_history = spark.sql(f"DESCRIBE HISTORY {left_table} LIMIT 5").collect()
+            right_history = spark.sql(f"DESCRIBE HISTORY {right_table} LIMIT 5").collect()
+            left_operations = [r.operation for r in left_history]
+            right_operations = [r.operation for r in right_history]
+
+            lm_raw = getattr(left_history[0], "operationMetrics", None) or {} if left_history else {}
+            rm_raw = getattr(right_history[0], "operationMetrics", None) or {} if right_history else {}
+            if isinstance(lm_raw, str):
+                try:
+                    lm_raw = json.loads(lm_raw)
+                except Exception:
+                    lm_raw = {}
+            if isinstance(rm_raw, str):
+                try:
+                    rm_raw = json.loads(rm_raw)
+                except Exception:
+                    rm_raw = {}
+            metric_keys = ["numTargetRowsInserted", "numTargetRowsUpdated", "numTargetRowsDeleted"]
+            metrics_block = {}
+            for mk in metric_keys:
+                lv = int(lm_raw.get(mk, 0) or 0)
+                rv = int(rm_raw.get(mk, 0) or 0)
+                metrics_block[mk] = {"left": lv, "right": rv, "match": lv == rv}
+            inserted_match = metrics_block.get("numTargetRowsInserted", {}).get("match", True)
+            updated_match = metrics_block.get("numTargetRowsUpdated", {}).get("match", True)
+            deleted_match = metrics_block.get("numTargetRowsDeleted", {}).get("match", True)
+            delta_ops_severity = "PASS"
+            if inserted_match is False or updated_match is False or deleted_match is False:
+                delta_ops_severity = "FAIL"
+            summary.append(
+                {
+                    "check_id": "delta_ops.metrics",
+                    "pair_label": label,
+                    "severity": delta_ops_severity,
+                    "metrics": {
+                        "left_operations": left_operations,
+                        "right_operations": right_operations,
+                        "metrics": metrics_block,
+                        "inserted_match": inserted_match,
+                        "updated_match": updated_match,
+                        "deleted_match": deleted_match,
+                    },
+                }
+            )
+        except Exception as exc:
+            summary.append(
+                {
+                    "check_id": "delta_ops.metrics",
+                    "pair_label": label,
+                    "severity": "BLOCKED",
+                    "message": str(exc),
+                    "metrics": {},
+                }
+            )
+
+    if checks.get("enable_delta_version_stats", True):
+        try:
+            left_history = spark.sql(f"DESCRIBE HISTORY {left_table} LIMIT 100").collect()
+            right_history = spark.sql(f"DESCRIBE HISTORY {right_table} LIMIT 100").collect()
+            left_versions = [int(r.version) for r in left_history]
+            right_versions = [int(r.version) for r in right_history]
+            left_sequence = [r.operation for r in left_history]
+            right_sequence = [r.operation for r in right_history]
+            sequence_match = left_sequence == right_sequence
+            commit_count_match = len(left_history) == len(right_history)
+            delta_version_severity = "PASS"
+            if sequence_match is False:
+                delta_version_severity = "FAIL"
+            elif commit_count_match is False:
+                delta_version_severity = "REVIEW"
+            summary.append(
+                {
+                    "check_id": "delta_version.stats",
+                    "pair_label": label,
+                    "severity": delta_version_severity,
+                    "metrics": {
+                        "left_start_version": min(left_versions) if left_versions else None,
+                        "right_start_version": min(right_versions) if right_versions else None,
+                        "left_end_version": max(left_versions) if left_versions else None,
+                        "right_end_version": max(right_versions) if right_versions else None,
+                        "left_commits": len(left_history),
+                        "right_commits": len(right_history),
+                        "left_sequence": left_sequence,
+                        "right_sequence": right_sequence,
+                        "sequence_match": sequence_match,
+                        "commit_count_match": commit_count_match,
+                    },
+                }
+            )
+        except Exception as exc:
+            summary.append(
+                {
+                    "check_id": "delta_version.stats",
+                    "pair_label": label,
+                    "severity": "BLOCKED",
+                    "message": str(exc),
+                    "metrics": {},
+                }
+            )
+
+# COMMAND ----------
+
+if row_issue_dfs:
+    row_issues = row_issue_dfs[0]
+    for _df in row_issue_dfs[1:]:
+        row_issues = row_issues.unionByName(_df, allowMissingColumns=True)
+    if detail_format == "delta":
+        row_issues.write.mode("overwrite").format("delta").save(details_run_root)
+    elif detail_format == "parquet":
+        row_issues.write.mode("overwrite").parquet(details_run_root)
+    else:
+        row_issues.write.mode("overwrite").json(details_run_root)
+
+if distribution_detail_dfs:
+    distribution_summary = distribution_detail_dfs[0]
+    for _df in distribution_detail_dfs[1:]:
+        distribution_summary = distribution_summary.unionByName(_df, allowMissingColumns=True)
+    if detail_format == "delta":
+        distribution_summary.write.mode("overwrite").format("delta").save(distribution_run_root)
+    elif detail_format == "parquet":
+        distribution_summary.write.mode("overwrite").parquet(distribution_run_root)
+    else:
+        distribution_summary.write.mode("overwrite").json(distribution_run_root)
+
+overall_severity = "PASS"
+for _entry in summary:
+    _sev = _entry.get("severity", "PASS")
+    if _sev == "SKIPPED":
+        continue
+    if _severity_order.get(_sev, 0) > _severity_order.get(overall_severity, 0):
+        overall_severity = _sev
+
+summary_doc = {
+    "dual_run_id": dual_run_id,
+    "project_name": project_name,
+    "group_id": group_id,
+    "report_root": report_root,
+    "summary_uri": f"{summary_run_root}/summary.json",
+    "details_uri": details_run_root,
+    "distribution_summary_uri": distribution_run_root,
+    "overall_severity": overall_severity,
+    "results": summary,
+}
+summary_json = json.dumps(summary_doc, default=str)
+summary_path = f"{summary_run_root}/summary.json"
+dbutils.fs.put(summary_path, summary_json, overwrite=True)
