@@ -1,7 +1,10 @@
 """
-Airflow DAG: submit Job 1 (Pub/Sub → bronze_orders) as a serverless Databricks JAR task.
+Airflow DAG: submit Job 2 (bronze_orders → silver_orders) as a serverless Databricks JAR task.
 
-Trigger with JSON conf (see run_raw_order_ingestion_trigger_conf.example.json) or use DAG param defaults.
+Reads new bronze Delta commits, joins customers, MERGE upserts into silver.
+Stops after idle timeout with no new bronze rows (AvailableNow loop in the JAR).
+
+Trigger with JSON conf (see run_order_enrichment_trigger_conf.example.json) or use DAG param defaults.
 """
 from __future__ import annotations
 from datetime import datetime
@@ -62,11 +65,11 @@ from pathlib import Path
 import yaml
 PUBSUB_LANDING_URI = 'gs://BUCKET/pubsub-landing/orders'
 _ENV_CONFIG_PATH = Path(__file__).resolve().parent.parent / 'plugins' / 'config_dev.yml'
-_DAG_SIZING_PATH = Path(__file__).resolve().parent.parent / 'plugins' / 'run_raw_order_ingestion_pubsub_cluster_config.yml'
+_DAG_SIZING_PATH = Path(__file__).resolve().parent.parent / 'plugins' / 'run_order_enrichment_bronze_to_silver_cluster_config.yml'
 if not _ENV_CONFIG_PATH.is_file():
     raise FileNotFoundError('config_dev.yml not found under plugins/. Provision it in the target environment (e.g. gs://<composer_bucket>/plugins/config_dev.yml).')
 if not _DAG_SIZING_PATH.is_file():
-    raise FileNotFoundError('run_raw_order_ingestion_pubsub_cluster_config.yml not found under plugins/. Upload it to gs://<composer_bucket>/plugins/run_raw_order_ingestion_pubsub_cluster_config.yml.')
+    raise FileNotFoundError('run_order_enrichment_bronze_to_silver_cluster_config.yml not found under plugins/. Upload it to gs://<composer_bucket>/plugins/run_order_enrichment_bronze_to_silver_cluster_config.yml.')
 with _ENV_CONFIG_PATH.open(encoding='utf-8') as _env_config_file:
     _ENV_CONFIG = yaml.safe_load(_env_config_file)
 with _DAG_SIZING_PATH.open(encoding='utf-8') as _dag_sizing_file:
@@ -84,19 +87,17 @@ try:
 except ImportError:
     from airflow.models.param import Param
 DATABRICKS_CONN_ID = 'databricks_default'
-MAIN_CLASS = 'com.example.streaming.RawOrderIngestionMain'
+MAIN_CLASS = 'com.example.streaming.OrderEnrichmentMain'
 SERVERLESS_ENV_VERSION = '4'
-GCP_PROJECT = 'nprd-bh-use1-dev'
-PUBSUB_TOPIC = 'order-events'
-PUBSUB_SUBSCRIPTION = 'order-events-databricks'
-PUBSUB_SERVICE_CREDENTIAL = 'gcp-pubsub'
 BRONZE_TABLE = '`databricks-migrate-activity`.schema1.bronze_orders'
-CHECKPOINT_LOCATION = 'gs://bh-migrate-poc-bucket/pubsub-setup/checkpoints/bronze_orders_pubsub'
+CUSTOMER_TABLE = '`databricks-migrate-activity`.schema1.customers'
+SILVER_TABLE = '`databricks-migrate-activity`.schema1.silver_orders'
+CHECKPOINT_LOCATION = 'gs://bh-migrate-poc-bucket/pubsub-setup/checkpoints/silver_orders'
 UC_JAR_PATH = '/Volumes/databricks-migrate-activity/schema1/jars/databricks-structured-streaming-assembly-0.1.0.jar'
-TRIGGER_INTERVAL = '30 seconds'
+TRIGGER_INTERVAL = '1 minute'
 DEFAULT_IDLE_TIMEOUT = '2 minutes'
 SAFETY_TIMEOUT_SECONDS = 7200
-RUN_NAME = 'raw-order-ingestion-pubsub-serverless'
+RUN_NAME = 'order-enrichment-bronze-to-silver-serverless'
 PERFORMANCE_TARGET = 'PERFORMANCE_OPTIMIZED'
 
 def _conf_or_param(key: str) -> str:
@@ -104,8 +105,7 @@ def _conf_or_param(key: str) -> str:
     return f"{{{{ dag_run.conf.get('{key}', params.{key}) }}}}"
 
 def build_serverless_jar_payload() -> dict:
-    """Payload for jobs/runs/submit."""
-    parameters = ['--landing-path', _conf_or_param('landing_path'), '--target-table', _conf_or_param('bronze_table'), '--checkpoint-location', _conf_or_param('checkpoint_location'), '--trigger-interval', _conf_or_param('trigger_interval'), '--idle-timeout', _conf_or_param('idle_timeout')]
-    return {'run_name': _conf_or_param('run_name'), 'timeout_seconds': _conf_or_param('safety_timeout_seconds'), 'performance_target': _conf_or_param('performance_target'), 'tasks': [{'task_key': 'raw_order_ingestion', 'spark_jar_task': {'main_class_name': _conf_or_param('main_class'), 'parameters': parameters}, 'environment_key': 'jar_env'}], 'environments': [{'environment_key': 'jar_env', 'spec': {'environment_version': _conf_or_param('serverless_env_version'), 'java_dependencies': [_conf_or_param('uc_jar_path')]}}]}
-with DAG(dag_id='run_raw_order_ingestion_pubsub', description='Serverless JAR: Pub/Sub → bronze_orders (stops after idle timeout)', start_date=datetime(2025, 1, 1), schedule=None, catchup=False, tags=['databricks', 'pubsub', 'streaming', 'serverless'], params={'bronze_table': Param(BRONZE_TABLE, type='string', description='Bronze Delta target table (JAR --target-table)'), 'checkpoint_location': Param(CHECKPOINT_LOCATION, type='string', description='GCS checkpoint path for structured streaming'), 'trigger_interval': Param(TRIGGER_INTERVAL, type='string', description="Spark micro-batch trigger (e.g. '30 seconds', '1 minute')"), 'idle_timeout': Param(DEFAULT_IDLE_TIMEOUT, type='string', description="Stop Spark after this long with no Pub/Sub input (e.g. '2 minutes', '5 minutes')"), 'main_class': Param(MAIN_CLASS, type='string', description='Databricks JAR entrypoint main class'), 'uc_jar_path': Param(UC_JAR_PATH, type='string', description='Unity Catalog volume path to the assembly JAR'), 'serverless_env_version': Param(SERVERLESS_ENV_VERSION, type='string', description='Databricks serverless environment version'), 'safety_timeout_seconds': Param(SAFETY_TIMEOUT_SECONDS, type='integer', description='Databricks job run safety timeout in seconds'), 'run_name': Param(RUN_NAME, type='string', description='Databricks jobs/runs/submit run_name'), 'performance_target': Param(PERFORMANCE_TARGET, type='string', description='Serverless performance target (e.g. PERFORMANCE_OPTIMIZED)'), 'landing_path': Param(PUBSUB_LANDING_URI, type='string', description='GCS Pub/Sub landing prefix (JAR --landing-path)')}) as dag:
-    DatabricksSubmitRunOperator(task_id='submit_raw_order_ingestion_serverless_jar', databricks_conn_id=DATABRICKS_CONN_ID, json=build_serverless_jar_payload(), wait_for_termination=True)
+    parameters = ['--landing-path', _conf_or_param('landing_path'), '--source-table', _conf_or_param('bronze_table'), '--customer-table', _conf_or_param('customer_table'), '--target-table', _conf_or_param('silver_table'), '--checkpoint-location', _conf_or_param('checkpoint_location'), '--trigger-interval', _conf_or_param('trigger_interval'), '--idle-timeout', _conf_or_param('idle_timeout')]
+    return {'run_name': _conf_or_param('run_name'), 'timeout_seconds': _conf_or_param('safety_timeout_seconds'), 'performance_target': _conf_or_param('performance_target'), 'tasks': [{'task_key': 'order_enrichment', 'spark_jar_task': {'main_class_name': _conf_or_param('main_class'), 'parameters': parameters}, 'environment_key': 'jar_env'}], 'environments': [{'environment_key': 'jar_env', 'spec': {'environment_version': _conf_or_param('serverless_env_version'), 'java_dependencies': [_conf_or_param('uc_jar_path')]}}]}
+with DAG(dag_id='dualrun_child_unmigrated_OrderEnrichmentMain_c284ac42101f', description='Serverless JAR: bronze_orders → silver_orders (stops after idle timeout)', start_date=datetime(2025, 1, 1), schedule=None, catchup=False, tags=['databricks', 'delta', 'streaming', 'serverless', 'silver'], params={'bronze_table': Param(BRONZE_TABLE, type='string', description='Bronze Delta source table (JAR --source-table)'), 'customer_table': Param(CUSTOMER_TABLE, type='string', description='Customer dimension table (JAR --customer-table)'), 'silver_table': Param(SILVER_TABLE, type='string', description='Silver MERGE target table (JAR --target-table)'), 'checkpoint_location': Param(CHECKPOINT_LOCATION, type='string', description='GCS checkpoint path for structured streaming'), 'trigger_interval': Param(TRIGGER_INTERVAL, type='string', description="Spark micro-batch trigger (e.g. '1 minute', '30 seconds')"), 'idle_timeout': Param(DEFAULT_IDLE_TIMEOUT, type='string', description="Stop Spark after this long with no new bronze rows (e.g. '2 minutes', '5 minutes')"), 'main_class': Param(MAIN_CLASS, type='string', description='Databricks JAR entrypoint main class'), 'uc_jar_path': Param(UC_JAR_PATH, type='string', description='Unity Catalog volume path to the assembly JAR'), 'serverless_env_version': Param(SERVERLESS_ENV_VERSION, type='string', description='Databricks serverless environment version'), 'safety_timeout_seconds': Param(SAFETY_TIMEOUT_SECONDS, type='integer', description='Databricks job run safety timeout in seconds'), 'run_name': Param(RUN_NAME, type='string', description='Databricks jobs/runs/submit run_name'), 'performance_target': Param(PERFORMANCE_TARGET, type='string', description='Serverless performance target (e.g. PERFORMANCE_OPTIMIZED)'), 'landing_path': Param(PUBSUB_LANDING_URI, type='string', description='GCS Pub/Sub landing prefix (JAR --landing-path)')}) as dag:
+    DatabricksSubmitRunOperator(task_id='submit_order_enrichment_serverless_jar', databricks_conn_id=DATABRICKS_CONN_ID, json=build_serverless_jar_payload(), wait_for_termination=True)
