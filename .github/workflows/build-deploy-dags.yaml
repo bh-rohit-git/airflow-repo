@@ -1,11 +1,27 @@
-# Registration stub on main for workflow_dispatch API discovery.
+# Sync Airflow DAGs and plugins to Composer GCS bucket via WIF
 #
-# GitHub requires this workflow file to exist on the default branch before
-# workflow_dispatch can target a migration/feature branch via ref=.
-# The full deploy logic lives on migration output branches; dispatch with
-# ref=<migration-branch> runs that branch's version of this file.
+# Dual-run isolation:
+#   Prefer ``dags/dualrun/`` → Composer ``dags/`` (flatten).
+#   Falls back to full ``dags/`` rsync when dualrun is absent.
 #
-# See: https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_dispatch
+# - patch jar_file_uris + dual-run DATABRICKS_WORKSPACE_BASE in DAGs from env / GitHub vars
+# - rsync dual-run (or all) DAGs → gs://<composer-bucket>/dags/
+# - rsync .py files under airflow/dags/   -> gs://<composer-bucket>/dags/
+# - rsync all files under plugins/        -> gs://<composer-bucket>/plugins/
+# - upload dual-run notebooks  -> /Workspace/.../dualrun/{source_dag_id}/ on Databricks
+#
+# GitHub Environment vars (optional overrides):
+#   GCP_PROJECT_ID, WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT
+#   JAR_FILE_URIS — comma-separated or JSON array (e.g. gs://bucket/jars/app.jar)
+#   GCS_JAR_PREFIX, VERSIONLESS_JAR_NAME — used when JAR_FILE_URIS is unset
+#   DATABRICKS_HOST, DATABRICKS_WORKSPACE_BASE
+#
+# GitHub Environment secret:
+#   DATABRICKS_TOKEN — PAT with workspace import permissions
+#
+# workflow_dispatch inputs:
+#   gcs_bucket — Composer GCS bucket (required for DAG/plugin sync; no gs:// prefix)
+#   jar_file_uris — optional full gs:// JAR URI(s) for Param patching during deploy
 #
 name: build-deploy-dags
 
@@ -21,18 +37,276 @@ on:
           - qa
           - prod
         default: 'dev'
+      gcs_bucket:
+        description: 'Composer GCS bucket name for DAG/plugin sync (no gs:// prefix)'
+        required: true
+        type: string
+        default: ''
+      jar_file_uris:
+        description: 'Optional JAR URI(s) for dag params patch (gs://…/app.jar)'
+        required: false
+        type: string
+        default: ''
+
+env:
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'nprd-bh-use1-dev' }}
+  WORKLOAD_IDENTITY_PROVIDER: ${{ vars.WORKLOAD_IDENTITY_PROVIDER || 'projects/609754835936/locations/global/workloadIdentityPools/dev-gh-actions-pool/providers/dev-ghactions-provider' }}
+  GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT || 'bh-dev-composer-cicd@nprd-bh-use1-dev.iam.gserviceaccount.com' }}
+  GCS_BUCKET: ${{ github.event.inputs.gcs_bucket }}
+  DAGS_DIR: dags
+  DUALRUN_DAGS_SUBDIR: dualrun
+  AIRFLOW_DAGS_DIR: airflow/dags
+  GCS_DAGS_PREFIX: dags
+  PLUGINS_DIR: plugins
+  GCS_PLUGINS_PREFIX: plugins
+  DUALRUN_NOTEBOOKS_DIR: notebooks/dualrun
+  DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+  GCS_JAR_PREFIX: ${{ vars.GCS_JAR_PREFIX || 'jars' }}
+  JAR_FILE_URIS: ${{ github.event.inputs.jar_file_uris || vars.JAR_FILE_URIS }}
+  VERSIONLESS_JAR_NAME: ${{ vars.VERSIONLESS_JAR_NAME }}
+  DATABRICKS_WORKSPACE_BASE: ${{ vars.DATABRICKS_WORKSPACE_BASE }}
+  PATCH_JAR_SCRIPT: .github/patch_dag_jar_uris.py
 
 jobs:
   build-deploy-dags:
-    name: Register build-deploy-dags workflow (main stub)
+    name: Sync DAGs and plugins to Composer GCS
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.target_environment }}
     permissions:
       contents: read
+      id-token: write
 
     steps:
-      - name: Stub only on main
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Patch jar_file_uris and dual-run notebook base in DAGs
         run: |
-          echo "This is the main-branch registration stub for build-deploy-dags."
-          echo "Dual-run and migration deploys should dispatch with ref=<migration-branch>"
-          echo "so the full workflow from that branch runs (DAG sync, plugins, dual-run notebooks)."
+          set -euo pipefail
+
+          SCRIPT="${{ env.PATCH_JAR_SCRIPT }}"
+          if [ ! -f "$SCRIPT" ]; then
+            echo "No $SCRIPT in repository; skipping DAG default patches."
+            exit 0
+          fi
+
+          DUALRUN_DIR="${{ env.DAGS_DIR }}/${{ env.DUALRUN_DAGS_SUBDIR }}"
+          if [ -d "$DUALRUN_DIR" ]; then
+            python3 "$SCRIPT" --dags-dir "$DUALRUN_DIR"
+          fi
+          python3 "$SCRIPT" --dags-dir "${{ env.DAGS_DIR }}"
+          AIRFLOW_DAGS="${{ env.AIRFLOW_DAGS_DIR }}"
+          if [ -n "$AIRFLOW_DAGS" ] && [ -d "$AIRFLOW_DAGS" ] && [ "$AIRFLOW_DAGS" != "${{ env.DAGS_DIR }}" ]; then
+            python3 "$SCRIPT" --dags-dir "$AIRFLOW_DAGS"
+          fi
+
+      - name: Rsync dual-run DAGs (or dags/) to Composer bucket
+        run: |
+          set -euo pipefail
+
+          BASE="${{ env.DAGS_DIR }}"
+          DUALRUN_DIR="${BASE}/${{ env.DUALRUN_DAGS_SUBDIR }}"
+          if [ -d "$DUALRUN_DIR" ] && [ -n "$(find "$DUALRUN_DIR" -type f -name '*.py' | head -n 1)" ]; then
+            SOURCE="$DUALRUN_DIR"
+            echo "Using isolated dual-run DAGs from ${SOURCE}/"
+          else
+            SOURCE="$BASE"
+            echo "No dags/dualrun content; falling back to ${SOURCE}/"
+          fi
+          BUCKET="${{ env.GCS_BUCKET }}"
+          PREFIX="${{ env.GCS_DAGS_PREFIX }}"
+
+          BUCKET="${BUCKET#gs://}"
+          BUCKET="${BUCKET%/}"
+          PREFIX="${PREFIX#/}"
+          PREFIX="${PREFIX%/}"
+
+          if [ -z "$BUCKET" ]; then
+            echo "Error: gcs_bucket workflow input is required (Composer bucket name)."
+            exit 1
+          fi
+
+          if [ ! -d "$SOURCE" ]; then
+            echo "No ${SOURCE}/ directory in this repository; nothing to sync."
+            exit 0
+          fi
+
+          if [ -z "$(find "$SOURCE" -type f | head -n 1)" ]; then
+            echo "Error: ${SOURCE}/ exists but contains no files."
+            exit 1
+          fi
+
+          FILE_COUNT="$(find "$SOURCE" -type f | wc -l | tr -d ' ')"
+          DEST_URI="gs://${BUCKET}/${PREFIX}"
+          echo "Rsyncing all files from '${SOURCE}/' (${FILE_COUNT} file(s)) to '${DEST_URI}/'..."
+
+          gcloud storage rsync "$SOURCE" "$DEST_URI" \
+            --recursive
+
+          echo "DAG sync completed successfully."
+
+      - name: Rsync airflow/dags .py files to Composer bucket
+        run: |
+          set -euo pipefail
+
+          SOURCE="${{ env.AIRFLOW_DAGS_DIR }}"
+          BUCKET="${{ env.GCS_BUCKET }}"
+          PREFIX="${{ env.GCS_DAGS_PREFIX }}"
+
+          BUCKET="${BUCKET#gs://}"
+          BUCKET="${BUCKET%/}"
+          PREFIX="${PREFIX#/}"
+          PREFIX="${PREFIX%/}"
+
+          if [ -z "$SOURCE" ] || [ "$SOURCE" = "${{ env.DAGS_DIR }}" ]; then
+            echo "AIRFLOW_DAGS_DIR not set or same as DAGS_DIR; skipping airflow/dags sync."
+            exit 0
+          fi
+
+          if [ ! -d "$SOURCE" ]; then
+            echo "No ${SOURCE}/ directory in this repository; skipping airflow/dags sync."
+            exit 0
+          fi
+
+          if [ -z "$(find "$SOURCE" -type f -name '*.py' | head -n 1)" ]; then
+            echo "No .py files under ${SOURCE}/; skipping airflow/dags sync."
+            exit 0
+          fi
+
+          FILE_COUNT="$(find "$SOURCE" -type f -name '*.py' | wc -l | tr -d ' ')"
+          DEST_URI="gs://${BUCKET}/${PREFIX}"
+          echo "Uploading ${FILE_COUNT} .py file(s) from '${SOURCE}/' to '${DEST_URI}/'..."
+
+          UPLOADED=0
+          while IFS= read -r -d '' py_file; do
+            rel="${py_file#"$SOURCE/"}"
+            echo "  -> ${rel}"
+            gcloud storage cp "$py_file" "${DEST_URI}/${rel}"
+            UPLOADED=$((UPLOADED + 1))
+          done < <(find "$SOURCE" -type f -name '*.py' -print0)
+
+          echo "airflow/dags sync completed successfully (${UPLOADED} file(s))."
+
+      - name: Rsync plugins/ folder to Composer bucket
+        run: |
+          set -euo pipefail
+
+          SOURCE="${{ env.PLUGINS_DIR }}"
+          BUCKET="${{ env.GCS_BUCKET }}"
+          PREFIX="${{ env.GCS_PLUGINS_PREFIX }}"
+
+          BUCKET="${BUCKET#gs://}"
+          BUCKET="${BUCKET%/}"
+          PREFIX="${PREFIX#/}"
+          PREFIX="${PREFIX%/}"
+
+          if [ ! -d "$SOURCE" ]; then
+            echo "No ${SOURCE}/ directory in this repository; skipping plugins sync."
+            exit 0
+          fi
+
+          if [ -z "$(find "$SOURCE" -type f | head -n 1)" ]; then
+            echo "No files under ${SOURCE}/; skipping plugins sync."
+            exit 0
+          fi
+
+          FILE_COUNT="$(find "$SOURCE" -type f | wc -l | tr -d ' ')"
+          DEST_URI="gs://${BUCKET}/${PREFIX}"
+          echo "Rsyncing all files from '${SOURCE}/' (${FILE_COUNT} file(s)) to '${DEST_URI}/'..."
+
+          gcloud storage rsync "$SOURCE" "$DEST_URI" \
+            --recursive
+
+          echo "Plugins sync completed successfully."
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@v0.272.0
+
+      - name: Upload dual-run notebooks to Databricks Workspace
+        env:
+          DATABRICKS_AUTH_TYPE: pat
+          DATABRICKS_HOST: ${{ env.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          SOURCE="${{ env.DUALRUN_NOTEBOOKS_DIR }}"
+          DEST="${{ env.DATABRICKS_WORKSPACE_BASE }}"
+
+          if [ -z "${DEST}" ]; then
+            echo "DATABRICKS_WORKSPACE_BASE is not set; skipping dual-run Workspace upload."
+            exit 0
+          fi
+
+          if [ -z "${{ env.DATABRICKS_HOST }}" ]; then
+            echo "DATABRICKS_HOST is not set; skipping dual-run Workspace upload."
+            exit 0
+          fi
+
+          if [ ! -d "$SOURCE" ]; then
+            echo "No ${SOURCE}/ directory; skipping dual-run Workspace upload."
+            exit 0
+          fi
+
+          case "$DEST" in
+            /Users/*) DEST="/Workspace$DEST" ;;
+          esac
+
+          if [[ ! "$DEST" == /Workspace/* ]]; then
+            echo "DATABRICKS_WORKSPACE_BASE must start with /Workspace/ or /Users/; skipping upload."
+            exit 0
+          fi
+
+          UPLOADED=0
+
+          # Shared notebooks live at notebooks/dualrun/*.py (ensure_clones, compare_outputs).
+          SHARED_COUNT="$(find "$SOURCE" -maxdepth 1 -type f -name '*.py' | wc -l | tr -d ' ')"
+          if [ "$SHARED_COUNT" -gt 0 ]; then
+            databricks workspace mkdirs "$DEST" || true
+            echo "Importing ${SHARED_COUNT} shared dual-run notebook(s) from '${SOURCE}/' to '${DEST}/'..."
+            while IFS= read -r -d '' py_file; do
+              remote_path="$DEST/$(basename "$py_file")"
+              echo "  -> $remote_path"
+              databricks workspace import "$remote_path" --file "$py_file" --format SOURCE --language PYTHON --overwrite
+            done < <(find "$SOURCE" -maxdepth 1 -type f -name '*.py' -print0)
+            UPLOADED=$((UPLOADED + SHARED_COUNT))
+          fi
+
+          # Per-group notebooks (e.g. mock_source_data) live under notebooks/dualrun/<slug>/.
+          for DAG_DIR in "$SOURCE"/*/; do
+            [ -d "$DAG_DIR" ] || continue
+            SOURCE_DAG_ID="$(basename "$DAG_DIR")"
+            if [ -z "$(find "$DAG_DIR" -maxdepth 1 -type f -name '*.py' | head -n 1)" ]; then
+              echo "No .py files under ${DAG_DIR}; skipping."
+              continue
+            fi
+            DEST_DIR="$DEST/$SOURCE_DAG_ID"
+            databricks workspace mkdirs "$DEST_DIR" || true
+            FILE_COUNT="$(find "$DAG_DIR" -maxdepth 1 -type f -name '*.py' | wc -l | tr -d ' ')"
+            echo "Importing ${FILE_COUNT} dual-run notebook(s) from '${DAG_DIR}' to '${DEST_DIR}/'..."
+            while IFS= read -r -d '' py_file; do
+              remote_path="$DEST_DIR/$(basename "$py_file")"
+              echo "  -> $remote_path"
+              databricks workspace import "$remote_path" --file "$py_file" --format SOURCE --language PYTHON --overwrite
+            done < <(find "$DAG_DIR" -maxdepth 1 -type f -name '*.py' -print0)
+            UPLOADED=$((UPLOADED + FILE_COUNT))
+          done
+
+          if [ "$UPLOADED" -eq 0 ]; then
+            echo "No dual-run .py notebooks under ${SOURCE}/; skipping Workspace upload."
+            exit 0
+          fi
+
+          echo "Dual-run Workspace upload completed (${UPLOADED} notebook(s))."
+          databricks workspace list "$DEST" || true
