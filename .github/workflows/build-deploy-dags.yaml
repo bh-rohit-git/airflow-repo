@@ -11,7 +11,7 @@
 # - upload dual-run notebooks  -> /Workspace/.../dualrun/{source_dag_id}/ on Databricks
 #
 # GitHub Environment vars (optional overrides):
-#   GCP_PROJECT_ID, WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT, GCS_BUCKET
+#   GCP_PROJECT_ID, WORKLOAD_IDENTITY_PROVIDER, GCP_SERVICE_ACCOUNT
 #   JAR_FILE_URIS — comma-separated or JSON array (e.g. gs://bucket/jars/app.jar)
 #   GCS_JAR_PREFIX, VERSIONLESS_JAR_NAME — used when JAR_FILE_URIS is unset
 #   DATABRICKS_HOST, DATABRICKS_WORKSPACE_BASE
@@ -20,6 +20,7 @@
 #   DATABRICKS_TOKEN — PAT with workspace import permissions
 #
 # workflow_dispatch inputs:
+#   gcs_bucket — Composer GCS bucket (required for DAG/plugin sync; no gs:// prefix)
 #   jar_file_uris — optional full gs:// JAR URI(s) for Param patching during deploy
 #
 name: build-deploy-dags
@@ -36,6 +37,11 @@ on:
           - qa
           - prod
         default: 'dev'
+      gcs_bucket:
+        description: 'Composer GCS bucket name for DAG/plugin sync (no gs:// prefix)'
+        required: true
+        type: string
+        default: ''
       jar_file_uris:
         description: 'Optional JAR URI(s) for dag params patch (gs://…/app.jar)'
         required: false
@@ -46,7 +52,7 @@ env:
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'nprd-bh-use1-dev' }}
   WORKLOAD_IDENTITY_PROVIDER: ${{ vars.WORKLOAD_IDENTITY_PROVIDER || 'projects/609754835936/locations/global/workloadIdentityPools/dev-gh-actions-pool/providers/dev-ghactions-provider' }}
   GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT || 'bh-dev-composer-cicd@nprd-bh-use1-dev.iam.gserviceaccount.com' }}
-  GCS_BUCKET: ${{ vars.GCS_BUCKET || 'us-east1-bh-d-composer-usea-754b7438-bucket' }}
+  GCS_BUCKET: ${{ github.event.inputs.gcs_bucket }}
   DAGS_DIR: dags
   DUALRUN_DAGS_SUBDIR: dualrun
   AIRFLOW_DAGS_DIR: airflow/dags
@@ -125,6 +131,11 @@ jobs:
           BUCKET="${BUCKET%/}"
           PREFIX="${PREFIX#/}"
           PREFIX="${PREFIX%/}"
+
+          if [ -z "$BUCKET" ]; then
+            echo "Error: gcs_bucket workflow input is required (Composer bucket name)."
+            exit 1
+          fi
 
           if [ ! -d "$SOURCE" ]; then
             echo "No ${SOURCE}/ directory in this repository; nothing to sync."
